@@ -3,7 +3,7 @@ name: Send Daily PW Polls
 on:
   schedule:
     # 8:00 AM IST = 2:30 AM UTC — change this to your preferred time
-    - cron: '30 2 * * *'
+    - cron: '30 8 * * *'
 
   # Manual trigger button on GitHub Actions page
   workflow_dispatch:
