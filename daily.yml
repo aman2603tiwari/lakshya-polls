@@ -1,0 +1,33 @@
+name: Send Daily PW Polls
+
+on:
+  schedule:
+    # Runs every day at 8:00 AM IST (2:30 AM UTC)
+    # To change time: adjust the UTC time here
+    # IST = UTC + 5:30, so 8:00 AM IST = 2:30 AM UTC
+    - cron: '30 2 * * *'
+
+  # This button lets you trigger it MANUALLY from GitHub website anytime
+  workflow_dispatch:
+
+jobs:
+  send-polls:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run poll script
+        env:
+          PW_USERNAME: ${{ secrets.PW_USERNAME }}
+          PW_PASSWORD: ${{ secrets.PW_PASSWORD }}
+        run: python send_polls.py
