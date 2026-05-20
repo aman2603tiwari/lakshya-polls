@@ -2,12 +2,10 @@ name: Send Daily PW Polls
 
 on:
   schedule:
-    # Runs every day at 8:00 AM IST (2:30 AM UTC)
-    # To change time: adjust the UTC time here
-    # IST = UTC + 5:30, so 8:00 AM IST = 2:30 AM UTC
+    # 8:00 AM IST = 2:30 AM UTC — change this to your preferred time
     - cron: '30 2 * * *'
 
-  # This button lets you trigger it MANUALLY from GitHub website anytime
+  # Manual trigger button on GitHub Actions page
   workflow_dispatch:
 
 jobs:
@@ -28,6 +26,7 @@ jobs:
 
       - name: Run poll script
         env:
-          PW_USERNAME: ${{ secrets.PW_USERNAME }}
-          PW_PASSWORD: ${{ secrets.PW_PASSWORD }}
+          PW_TOKEN:      ${{ secrets.PW_TOKEN }}
+          ALERT_EMAIL:   ${{ secrets.ALERT_EMAIL }}
+          GMAIL_APP_PWD: ${{ secrets.GMAIL_APP_PWD }}
         run: python send_polls.py
