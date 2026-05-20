@@ -191,6 +191,15 @@ def main():
         )
         send_alert_email(f"⚠️ Lakshya Polls — {fail} poll(s) failed today", email_body)
         exit(1)
+    else:
+        email_body = (
+            f"✅ PW Poll Automation completed successfully!\n\n"
+            f"All {success}/{total} polls have been sent.\n\n"
+            f"✓ {len(POLLS)} polls\n"
+            f"✓ {len(GROUPS)} groups\n\n"
+            "Everything is working perfectly. No action needed."
+        )
+        send_alert_email(f"✅ Lakshya Polls — All {success} polls sent successfully", email_body)
 
 
 if __name__ == "__main__":
