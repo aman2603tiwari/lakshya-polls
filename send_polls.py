@@ -11,14 +11,17 @@ import time
 import os
 import json
 import smtplib
+
+import uuid
+
 from email.mime.text import MIMEText
 
 # ── AUTH (from GitHub Secret — update weekly) ────────────────
-AUTH_TOKEN = os.environ["PW_TOKEN"]   # full "Bearer eyJ..." string
+AUTH_TOKEN = os.environ["PW_TOKEN"]
 
 # ── EMAIL ALERT CONFIG (from GitHub Secrets) ─────────────────
-ALERT_EMAIL   = os.environ["ALERT_EMAIL"]    # your gmail address
-GMAIL_APP_PWD = os.environ["GMAIL_APP_PWD"]  # gmail app password (not your real password)
+ALERT_EMAIL   = os.environ["ALERT_EMAIL"]
+GMAIL_APP_PWD = os.environ["GMAIL_APP_PWD"]
 
 # ── PERMANENT IDs (never change these) ───────────────────────
 CLIENT_ID  = "5eb393ee95fab7468a79d189"
@@ -50,7 +53,6 @@ POLLS = [
 
 
 def send_alert_email(subject: str, body: str):
-    """Send a Gmail alert when something goes wrong."""
     try:
         msg = MIMEText(body)
         msg["Subject"] = subject
@@ -71,11 +73,13 @@ def get_headers() -> dict:
         "Client-Id":     CLIENT_ID,
         "Client-Type":   "WEB",
         "x-sdk-version": "0.0.20",
+
+        "randomid":      str(uuid.uuid4()),
+
     }
 
 
 def check_token_valid():
-    """Quick check — hit a lightweight endpoint to verify token works."""
     res = requests.get(
         f"{API_BASE}/v1/users/get-user-detail",
         headers=get_headers(),
@@ -133,7 +137,6 @@ def post_poll_to_chat(group: dict, poll: dict, poll_data: dict):
 def main():
     print("🚀 PW Poll Automation starting — Lakshya JEE 2027")
 
-    # ── Token check first ──────────────────────────────────────
     try:
         check_token_valid()
         print("✅ Token is valid\n")
@@ -154,7 +157,6 @@ def main():
             send_alert_email("🔴 Lakshya Polls FAILED — Token Expired", msg)
             exit(1)
 
-    # ── Send all polls ─────────────────────────────────────────
     total   = len(POLLS) * len(GROUPS)
     success = 0
     fail    = 0
@@ -177,7 +179,6 @@ def main():
                 fail += 1
             time.sleep(DELAY_SEC)
 
-    # ── Final summary ──────────────────────────────────────────
     print(f"\n🎉 Done! {success} sent, {fail} failed out of {total} total.")
 
     if fail > 0:
