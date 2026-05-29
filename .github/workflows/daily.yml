@@ -2,31 +2,28 @@ name: Send Daily PW Polls
 
 on:
   schedule:
-    # 2:00 pm IST = 8:30 AM UTC — change this to your preferred time
     - cron: '30 8 * * *'
-
-  # Manual trigger button on GitHub Actions page
   workflow_dispatch:
 
 jobs:
   send-polls:
     runs-on: ubuntu-latest
 
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - name: Install dependencies
-        run: pip install requests
+      - run: pip install -r requirements.txt
 
       - name: Run poll script
         env:
-          PW_TOKEN:      ${{ secrets.PW_TOKEN }}
-          ALERT_EMAIL:   ${{ secrets.ALERT_EMAIL }}
+          PW_TOKEN: ${{ secrets.PW_TOKEN }}
+          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
           GMAIL_APP_PWD: ${{ secrets.GMAIL_APP_PWD }}
         run: python send_polls.py
