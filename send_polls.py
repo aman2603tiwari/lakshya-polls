@@ -11,9 +11,7 @@ import time
 import os
 import json
 import smtplib
-
 import uuid
-
 from email.mime.text import MIMEText
 
 # ── AUTH (from GitHub Secret — update weekly) ────────────────
@@ -73,9 +71,13 @@ def get_headers() -> dict:
         "Client-Id":     CLIENT_ID,
         "Client-Type":   "WEB",
         "x-sdk-version": "0.0.20",
-
         "randomid":      str(uuid.uuid4()),
-
+        # Browser-like headers so PW API doesn't block the request
+        "Origin":        "https://www.pw.live",
+        "Referer":       "https://www.pw.live/",
+        "User-Agent":    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+        "Accept":        "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
     }
 
 
@@ -103,10 +105,21 @@ def create_poll(group: dict, poll: dict) -> dict:
         ],
     }
     res = requests.post(url, json=payload, headers=get_headers(), timeout=10)
-    data = res.json()
-    if res.status_code in (200, 201) and data.get("data", {}).get("pollId"):
+
+    # Debug: print raw response if something goes wrong
+    if res.status_code not in (200, 201):
+        print(f"    [DEBUG] Status: {res.status_code}, Body: {res.text[:300]}")
+        raise RuntimeError(f"create-poll failed ({res.status_code}): {res.text[:200]}")
+
+    try:
+        data = res.json()
+    except Exception:
+        print(f"    [DEBUG] Non-JSON response: {res.text[:300]}")
+        raise RuntimeError(f"create-poll returned non-JSON: {res.text[:200]}")
+
+    if data.get("data", {}).get("pollId"):
         return data["data"]
-    raise RuntimeError(f"create-poll failed ({res.status_code}): {data.get('message', data)}")
+    raise RuntimeError(f"create-poll no pollId: {data}")
 
 
 def post_poll_to_chat(group: dict, poll: dict, poll_data: dict):
@@ -129,9 +142,10 @@ def post_poll_to_chat(group: dict, poll: dict, poll_data: dict):
         "pollOptions": poll_options_str,
     }
     res = requests.post(url, json=payload, headers=get_headers(), timeout=10)
-    data = res.json()
+
     if res.status_code not in (200, 201):
-        raise RuntimeError(f"chat failed ({res.status_code}): {data.get('message', data)}")
+        print(f"    [DEBUG] Status: {res.status_code}, Body: {res.text[:300]}")
+        raise RuntimeError(f"chat failed ({res.status_code}): {res.text[:200]}")
 
 
 def main():
@@ -147,9 +161,10 @@ def main():
                 "Your PW_TOKEN in GitHub Secrets has expired.\n\n"
                 "Steps to fix (takes 2 minutes):\n"
                 "  1. Open pw.live in Chrome (logged in)\n"
-                "  2. F12 → Network tab → click any api.penpencil.co request\n"
-                "  3. Copy the full 'Authorization' header value\n"
-                "  4. Go to GitHub → lakshya-polls → Settings → Secrets → PW_TOKEN → Update\n\n"
+                "  2. F12 → Network tab → manually create one poll in the UI\n"
+                "  3. Click the POST request to api.penpencil.co/v2/poll/create-poll\n"
+                "  4. Copy the full 'Authorization' header value\n"
+                "  5. Go to GitHub → lakshya-polls → Settings → Secrets → PW_TOKEN → Update\n\n"
                 "Polls were NOT sent today. After updating the token, "
                 "go to Actions → Run workflow to send them manually.\n"
             )
@@ -157,9 +172,9 @@ def main():
             send_alert_email("🔴 Lakshya Polls FAILED — Token Expired", msg)
             exit(1)
 
-    total   = len(POLLS) * len(GROUPS)
-    success = 0
-    fail    = 0
+    total    = len(POLLS) * len(GROUPS)
+    success  = 0
+    fail     = 0
     failures = []
 
     print(f"📋 {len(POLLS)} polls × {len(GROUPS)} groups = {total} total\n")
