@@ -2,9 +2,20 @@ name: Send Daily PW Polls
 
 on:
   schedule:
-    # 1:00 PM IST = 7:30 AM UTC
-    - cron: '30 7 * * 1-5'   # Monday to Friday only
+    # 1:00 PM IST = 7:30 AM UTC — Quiz + polls
+    - cron: '30 7 * * 1-5'
+    # 10:00 PM IST = 4:30 PM UTC — Solutions
+    - cron: '30 16 * * 1-5'
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Run mode: quiz or solution'
+        required: true
+        default: 'quiz'
+        type: choice
+        options:
+          - quiz
+          - solution
 
 jobs:
   send-polls:
@@ -21,10 +32,25 @@ jobs:
       - name: Install dependencies
         run: pip install requests groq
 
-      - name: Run poll script
+      - name: Determine mode
+        id: mode
+        run: |
+          # If manually triggered, use input. Otherwise detect by current UTC hour.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "mode=${{ github.event.inputs.mode }}" >> $GITHUB_OUTPUT
+          else
+            HOUR=$(date -u +%H)
+            if [ "$HOUR" = "16" ]; then
+              echo "mode=solution" >> $GITHUB_OUTPUT
+            else
+              echo "mode=quiz" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: Run script
         env:
           PW_TOKEN:      ${{ secrets.PW_TOKEN }}
           ALERT_EMAIL:   ${{ secrets.ALERT_EMAIL }}
           GMAIL_APP_PWD: ${{ secrets.GMAIL_APP_PWD }}
           GROQ_API_KEY:  ${{ secrets.GROQ_API_KEY }}
-        run: python send_polls.py
+        run: python send_polls.py --mode=${{ steps.mode.outputs.mode }}
