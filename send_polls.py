@@ -1,13 +1,7 @@
 """
 ================================================================
   PW POLL AUTOMATION - LAKSHYA JEE 2027
-  Full auto mode — Groq generates fresh questions daily from PYQs
-  
-  GitHub Secrets needed:
-    PW_TOKEN        — Bearer token from pw.live (update weekly)
-    ALERT_EMAIL     — your Gmail address
-    GMAIL_APP_PWD   — Gmail app password
-    GROQ_API_KEY    — from console.groq.com (free)
+  Groq llama-3.3-70b-versatile — token-optimized for free tier
 ================================================================
 """
 
@@ -22,23 +16,23 @@ from datetime import datetime
 from email.mime.text import MIMEText
 from groq import Groq
 
-# ── API KEYS (from GitHub Secrets) ───────────────────────────
+# ── SECRETS ───────────────────────────────────────────────────
 AUTH_TOKEN    = os.environ["PW_TOKEN"]
 ALERT_EMAIL   = os.environ["ALERT_EMAIL"]
 GMAIL_APP_PWD = os.environ["GMAIL_APP_PWD"]
 GROQ_API_KEY  = os.environ["GROQ_API_KEY"]
 
-# ── GROQ CONFIG ───────────────────────────────────────────────
+# ── GROQ ──────────────────────────────────────────────────────
 GROQ_MODEL  = "llama-3.3-70b-versatile"
 GROQ_CLIENT = Groq(api_key=GROQ_API_KEY)
 
-# ── PW CONSTANTS (permanent) ─────────────────────────────────
+# ── PW CONSTANTS ──────────────────────────────────────────────
 CLIENT_ID = "5eb393ee95fab7468a79d189"
 BATCH_ID  = "6779345c20fa0756e4a7fd08"
 API_BASE  = "https://api.penpencil.co"
 DELAY_SEC = 1.5
 
-# ── 5 GROUPS (permanent) ─────────────────────────────────────
+# ── GROUPS ────────────────────────────────────────────────────
 GROUPS = [
     {"name": "Group 1", "groupId": "69cb7c5e4a6bd7893a91aa22", "conversationId": "69ce5c7c8a5087b50b14c482"},
     {"name": "Group 2", "groupId": "69cb7c67e223436a272111c9", "conversationId": "69ce5d26b3e8f731557c9116"},
@@ -47,7 +41,6 @@ GROUPS = [
     {"name": "Group 5", "groupId": "69cb7c7426c54583a30f3039", "conversationId": "69ce60a65155c4ac4c289fea"},
 ]
 
-# ── SUBJECT CONFIG ────────────────────────────────────────────
 SUBJECTS = {
     "Physics":   "pdfs/physics_pyq.txt",
     "Chemistry": "pdfs/chemistry_pyq.txt",
@@ -84,74 +77,84 @@ def get_todays_mix() -> list:
     return mixes[day_index]
 
 
-# ── GROQ GENERATION ───────────────────────────────────────────
+# ── SMART TEXT SAMPLING ───────────────────────────────────────
 
-def load_subject_text(subject: str) -> str:
+def sample_subject_text(subject: str, max_chars: int = 3000) -> str:
+    """
+    Instead of sending entire PDF text (too large for Groq free tier),
+    sample a random chunk of 3000 chars from a random position.
+    Different chunk each day = different questions each day.
+    """
     path = SUBJECTS[subject]
     if not os.path.exists(path):
         raise FileNotFoundError(
-            f"{path} not found. Run extract_pdfs.py first and commit the .txt files to your repo."
+            f"{path} not found. Run extract_pdfs.py and commit the .txt files."
         )
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        return f.read()[:60000]
+        full_text = f.read()
 
+    total = len(full_text)
+    if total <= max_chars:
+        return full_text
+
+    # Use day-of-year + subject as seed so each day picks a different region
+    import random
+    seed = datetime.now().timetuple().tm_yday * 100 + hash(subject) % 100
+    random.seed(seed)
+    start = random.randint(0, total - max_chars)
+    chunk = full_text[start : start + max_chars]
+
+    # Clean start — don't start mid-word
+    first_newline = chunk.find("\n")
+    if first_newline > 0:
+        chunk = chunk[first_newline:]
+
+    return chunk.strip()
+
+
+# ── GROQ GENERATION ───────────────────────────────────────────
 
 def generate_questions_via_groq(subject_mix: list, history: dict) -> list:
-    subject_texts = {s: load_subject_text(s) for s in set(subject_mix)}
+    counts = Counter(subject_mix)
 
+    # Build compact subject blocks — 3000 chars each max
+    subject_blocks = ""
+    for subj in set(subject_mix):
+        text = sample_subject_text(subj, max_chars=3000)
+        subject_blocks += f"\n--- {subj.upper()} PYQ EXCERPT ---\n{text}\n"
+
+    # Recent used questions hint (last 15 only to save tokens)
     used_hint = ""
     if history["used_questions"]:
-        recent = history["used_questions"][-30:]
-        used_hint = (
-            "Do NOT repeat these recently used questions:\n"
-            + "\n".join(f"- {q}" for q in recent)
-            + "\n\n"
-        )
+        recent = history["used_questions"][-15:]
+        used_hint = "Avoid repeating:\n" + "\n".join(f"- {q}" for q in recent) + "\n\n"
 
-    counts = Counter(subject_mix)
-    dist   = ", ".join(f"{v} from {k}" for k, v in counts.items())
+    dist = ", ".join(f"{v} {k}" for k, v in counts.items())
 
-    prompt = f"""You are a JEE Main/Advanced question selector for Lakshya JEE 2027.
+    prompt = f"""You are a JEE question selector. Pick 5 JEE PYQ questions: {dist}.
 
-{used_hint}Select exactly 5 questions distributed as: {dist}.
+{used_hint}Rules:
+- Use questions from the excerpts below
+- 4 specific options each (not placeholders)
+- correct: 1=A 2=B 3=C 4=D
+- Add year tag e.g. [JEE 2019]
 
-Rules:
-- Pick actual JEE PYQs from the texts below
-- Each question must have exactly 4 specific options (not placeholders)
-- correct = 1 for A, 2 for B, 3 for C, 4 for D
-- Include year tag in question e.g. [JEE Main 2019]
-- Moderate difficulty level
+{subject_blocks}
 
---- PHYSICS ---
-{subject_texts.get("Physics", "")[:20000]}
+Reply ONLY with a JSON array of 5 objects, no markdown:
+[{{"subject":"Physics","question":"...","options":["...","...","...","..."],"correct":1}}]"""
 
---- CHEMISTRY ---
-{subject_texts.get("Chemistry", "")[:20000]}
-
---- MATHS ---
-{subject_texts.get("Maths", "")[:20000]}
-
-Return ONLY a valid JSON array of exactly 5 objects. No explanation, no markdown, no backticks.
-[
-  {{
-    "subject": "Physics",
-    "question": "Full question text [JEE Main 20XX]",
-    "options": ["option A", "option B", "option C", "option D"],
-    "correct": 2
-  }}
-]"""
-
-    print("🤖 Calling Groq llama-3.3-70b-versatile...")
+    print("🤖 Calling Groq...")
     response = GROQ_CLIENT.chat.completions.create(
         model=GROQ_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.7,
-        max_tokens=2000,
+        max_tokens=1500,
     )
 
     raw = response.choices[0].message.content.strip()
 
-    # Strip markdown fences if Groq adds them
+    # Strip markdown fences
     if "```" in raw:
         raw = raw.split("```")[1]
         if raw.startswith("json"):
@@ -161,14 +164,12 @@ Return ONLY a valid JSON array of exactly 5 objects. No explanation, no markdown
     questions = json.loads(raw)
 
     if len(questions) != 5:
-        raise ValueError(f"Groq returned {len(questions)} questions, need exactly 5")
+        raise ValueError(f"Groq returned {len(questions)} questions, need 5")
 
     for i, q in enumerate(questions):
-        assert "question" in q,        f"Q{i+1} missing question"
-        assert "options"  in q,        f"Q{i+1} missing options"
-        assert "correct"  in q,        f"Q{i+1} missing correct"
-        assert len(q["options"]) == 4, f"Q{i+1} must have 4 options"
-        assert 1 <= q["correct"] <= 4, f"Q{i+1} correct must be 1-4"
+        assert "question" in q        and q["question"].strip(), f"Q{i+1} missing question"
+        assert "options"  in q        and len(q["options"]) == 4, f"Q{i+1} needs 4 options"
+        assert "correct"  in q        and 1 <= q["correct"] <= 4, f"Q{i+1} correct must be 1-4"
 
     return questions
 
@@ -186,10 +187,11 @@ def send_alert_email(subject: str, body: str):
             smtp.send_message(msg)
         print("📧 Alert email sent!")
     except Exception as e:
-        print(f"⚠️ Could not send alert email: {e}")
+        print(f"⚠️ Email failed: {e}")
+        print(f"⚠️ Email subject was: {subject}")
 
 
-# ── PW API ────────────────────────────────────────────────────
+# ── PW HEADERS ────────────────────────────────────────────────
 
 def get_headers() -> dict:
     return {
@@ -234,10 +236,10 @@ def create_poll(group: dict, poll: dict) -> dict:
     try:
         data = res.json()
     except Exception:
-        raise RuntimeError(f"create-poll non-JSON: {res.text[:200]}")
+        raise RuntimeError(f"non-JSON response: {res.text[:200]}")
     if data.get("data", {}).get("pollId"):
         return data["data"]
-    raise RuntimeError(f"no pollId in response: {data}")
+    raise RuntimeError(f"no pollId: {data}")
 
 
 def post_poll_to_chat(group: dict, poll: dict, poll_data: dict):
@@ -279,22 +281,21 @@ def main():
     except RuntimeError as e:
         if "TOKEN_EXPIRED" in str(e):
             msg = (
-                "⚠️ TOKEN EXPIRED\n\n"
-                "Fix:\n"
-                "  1. pw.live → any group → manually create one poll\n"
-                "  2. F12 → Network → POST to v2/poll/create-poll → copy Authorization\n"
-                "  3. GitHub → Secrets → PW_TOKEN → Update\n"
-                "  4. Actions → Run workflow\n"
+                "TOKEN EXPIRED — fix:\n"
+                "1. pw.live → group → manually create one poll\n"
+                "2. F12 → Network → POST create-poll → copy Authorization\n"
+                "3. GitHub Secrets → PW_TOKEN → Update\n"
+                "4. Actions → Run workflow\n"
             )
             print(msg)
-            send_alert_email("🔴 Lakshya Polls FAILED — Token Expired", msg)
+            send_alert_email("🔴 Lakshya Polls — Token Expired", msg)
             exit(1)
 
-    # Load history
+    # History
     history = load_history()
     print(f"📚 {len(history['used_questions'])} questions used so far\n")
 
-    # Today's subject mix
+    # Today's mix
     subject_mix = get_todays_mix()
     counts = Counter(subject_mix)
     print(f"📐 Today's mix: {dict(counts)}\n")
@@ -302,17 +303,17 @@ def main():
     # Generate via Groq
     try:
         questions = generate_questions_via_groq(subject_mix, history)
-        print(f"\n✅ Groq generated {len(questions)} questions:")
+        print(f"✅ Groq generated {len(questions)} questions:")
         for i, q in enumerate(questions):
             print(f"   Q{i+1} [{q.get('subject','?')}]: {q['question'][:70]}...")
         print()
     except Exception as e:
-        msg = f"❌ Groq failed: {e}"
-        print(msg)
-        send_alert_email("🔴 Lakshya Polls FAILED — Groq Error", msg)
+        msg = f"Groq failed: {e}"
+        print(f"❌ {msg}")
+        send_alert_email("🔴 Lakshya Polls — Groq Error", msg)
         exit(1)
 
-    # Send to all groups
+    # Send polls
     total    = len(questions) * len(GROUPS)
     success  = 0
     fail     = 0
@@ -335,27 +336,26 @@ def main():
                 fail += 1
             time.sleep(DELAY_SEC)
 
-    # Save history
+    # Update history
     for q in questions:
         fp = q["question"][:80]
         if fp not in history["used_questions"]:
             history["used_questions"].append(fp)
     save_history(history)
-    print(f"\n📝 History updated — {len(history['used_questions'])} questions tracked")
-
-    print(f"\n🎉 Done! {success} sent, {fail} failed out of {total}.")
+    print(f"\n📝 History: {len(history['used_questions'])} total tracked")
+    print(f"🎉 Done! {success} sent, {fail} failed out of {total}.")
 
     if fail > 0:
         send_alert_email(
-            f"⚠️ Lakshya Polls — {fail} failed today",
-            f"✅ Sent: {success}/{total}\n❌ Failed: {fail}/{total}\n\n"
+            f"⚠️ Lakshya Polls — {fail} failed",
+            f"Sent: {success}/{total}\nFailed: {fail}/{total}\n\n"
             + "\n".join(f"• {f}" for f in failures)
         )
         exit(1)
     else:
         send_alert_email(
-            f"✅ Lakshya Polls — All {success} polls sent!",
-            f"📅 {today}\n📐 Mix: {dict(counts)}\n\n"
+            f"✅ Lakshya Polls — All {success} sent!",
+            f"{today}\nMix: {dict(counts)}\n\n"
             + "\n".join(f"Q{i+1} [{q.get('subject','?')}]: {q['question'][:80]}"
                         for i, q in enumerate(questions))
         )
