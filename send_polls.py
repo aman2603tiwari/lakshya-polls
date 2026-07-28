@@ -35,12 +35,15 @@ CLIENT_ID = "5eb393ee95fab7468a79d189"
 BATCH_ID  = "6779345c20fa0756e4a7fd08"
 
 HEADERS = {
-    "Authorization": f"Bearer {PW_TOKEN}",
-    "client-id":     CLIENT_ID,
-    "client-type":   "WEB",
+    "Authorization":  f"Bearer {PW_TOKEN}",
+    "client-id":      CLIENT_ID,
+    "client-type":    "WEB",
+    "origin":         "https://www.pw.live",
+    "referer":        "https://www.pw.live/",
+    "x-sdk-version":  "0.0.28",
+    "randomid":       "2f81cbed-4d22-4f57-994e-3f78dbf6e309",
 }
 
-# JSON headers (for non-multipart requests)
 JSON_HEADERS = {**HEADERS, "Content-Type": "application/json"}
 
 # ─── GROUPS ───────────────────────────────────────────────────────────────────
@@ -111,9 +114,8 @@ def check_token():
 
 def upload_image(image_path: str) -> str:
     """
-    Upload an image to PW and return the imageId.
+    Upload image to PW → return imageId.
     POST /v1/files  (multipart/form-data)
-    Returns imageId string or raises Exception.
     """
     path = Path(image_path)
     log(f"Uploading image: {path.name} ({path.stat().st_size // 1024} KB)")
@@ -122,15 +124,15 @@ def upload_image(image_path: str) -> str:
         files = {"file": (path.name, f, "image/jpeg")}
         r = requests.post(
             f"{BASE_URL}/v1/files",
-            headers=HEADERS,   # no Content-Type — requests sets multipart boundary
+            headers=HEADERS,   # no Content-Type — requests sets multipart boundary automatically
             files=files,
             timeout=30
         )
 
+    log(f"Upload response: {r.status_code} {r.text[:300]}")
+
     if r.status_code in (200, 201):
         data = r.json()
-        log(f"Upload response: {json.dumps(data)[:200]}")
-        # Try common response shapes
         image_id = (
             data.get("data", {}).get("_id")
             or data.get("data", {}).get("imageId")
@@ -138,11 +140,11 @@ def upload_image(image_path: str) -> str:
             or data.get("imageId")
         )
         if not image_id:
-            raise Exception(f"imageId not found in response: {data}")
+            raise Exception(f"imageId not found in upload response: {data}")
         log(f"✅ Image uploaded → imageId: {image_id}")
         return image_id
     else:
-        raise Exception(f"Upload failed: {r.status_code} {r.text[:200]}")
+        raise Exception(f"Upload failed: {r.status_code} {r.text[:300]}")
 
 
 def send_message(group, text):
@@ -170,7 +172,7 @@ def send_message(group, text):
 
 
 def send_image_message(group, image_id, file_size_kb):
-    """Send an image message to a group using an already-uploaded imageId."""
+    """Send an image message using an already-uploaded imageId."""
     payload = {
         "batchId":   BATCH_ID,
         "groupId":   group["groupId"],
@@ -330,6 +332,14 @@ RULES:
 ✅ Make the student FEEL seen, not lectured
 BANNED: "Never give up", "Believe in yourself", "Work hard", any generic cliche
 
+GREAT EXAMPLES:
+- "Your rank dropped 3000. Your parents said nothing. That silence is the heaviest weight you'll carry into that exam room."
+- "The integration you couldn't solve at midnight — that's the one on JEE paper. Sit back down."
+- "Every topper in that rank list had a night they wanted to quit. You're in that night right now. Stay."
+- "The student who scores 99 percentile doesn't work harder than you. They waste less."
+- "Your mock test is a mirror. You don't break the mirror because you don't like what you see."
+- "Kota didn't break you. The idea of going home empty-handed will."
+
 Return ONLY JSON: {"quote": "quote text, use \\n for line breaks"}"""
 
     categories = [
@@ -377,17 +387,15 @@ def run_motivation():
     file_size_kb = Path(img_path).stat().st_size // 1024
     log(f"Image saved → {img_path} ({file_size_kb} KB)")
 
-    # 3. Upload image ONCE (same image reused for all groups)
+    # 3. Upload image ONCE — reuse imageId for all 5 groups
     log("Uploading image to PW...")
     image_id = upload_image(img_path)
 
     # 4. Send to all groups
     for group in GROUPS:
         log(f"Sending to {group['name']}...")
-        # Message 1: header text
         send_message(group, "🌅 Today's Morning Motivation")
         time.sleep(0.5)
-        # Message 2: the image
         send_image_message(group, image_id, file_size_kb)
 
     log("✅ Motivation mode complete.")
