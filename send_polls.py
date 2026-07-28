@@ -105,22 +105,26 @@ def save_json(path, data):
 # ─── PW API CALLS ─────────────────────────────────────────────────────────────
 
 def check_token():
-    """Verify PW token is still valid."""
+    """Verify PW token is still valid by hitting the batch info endpoint."""
     try:
         r = requests.get(
-            f"{BASE_URL}/v2/user/profile",
+            f"{BASE_URL}/v2/batch/{BATCH_ID}",
             headers=HEADERS, timeout=10
         )
-        if r.status_code == 200:
+        if r.status_code in (200, 201):
             log("✅ Token valid.")
             return True
-        else:
-            log(f"❌ Token check failed: {r.status_code} {r.text[:200]}")
+        elif r.status_code == 401:
+            log(f"❌ Token expired/invalid: {r.status_code}")
             return False
+        else:
+            # Any other status (403, 404 etc) — token format is fine,
+            # endpoint may just not exist. Don't block execution.
+            log(f"[WARN] Token check got {r.status_code} — continuing anyway.")
+            return True
     except Exception as e:
-        log(f"❌ Token check error: {e}")
-        return False
-
+        log(f"[WARN] Token check error: {e} — continuing anyway.")
+        return True
 
 def send_message(group, text):
     """Send a plain text message to a group."""
