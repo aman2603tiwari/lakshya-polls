@@ -399,6 +399,7 @@ def run_motivation():
         send_image_message(group, image_id, file_size_kb)
 
     log("✅ Motivation mode complete.")
+    send_alert("✅ Motivation Sent", f"Morning motivation image sent to all 5 groups.\nDate: {date.today()}")
 
 
 # ─── MODE: QUIZ (1 PM) ────────────────────────────────────────────────────────
@@ -455,6 +456,7 @@ def run_quiz():
     save_json(HISTORY_FILE, history)
     log(f"History updated ({len(history['used'])} entries).")
     log("✅ Quiz mode complete.")
+    send_alert("✅ Polls Sent", f"5 polls sent to all 5 groups.\nSubjects: {subjects}\nDate: {date.today()}")
 
 
 # ─── MODE: SOLUTION (10 PM) ───────────────────────────────────────────────────
@@ -501,6 +503,7 @@ def run_solution():
             time.sleep(1.5)
 
     log("✅ Solution mode complete.")
+    send_alert("✅ Solutions Sent", f"5 solutions sent to all 5 groups.\nDate: {date.today()}")
 
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
