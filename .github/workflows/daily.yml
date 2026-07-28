@@ -2,32 +2,29 @@ name: Send Daily PW Polls
 
 on:
   schedule:
-    # Runs every day at 8:00 AM IST (2:30 AM UTC)
-    # To change time: adjust the UTC time here
-    # IST = UTC + 5:30, so 8:00 AM IST = 2:30 AM UTC
-    - cron: '30 2 * * *'
-
-  # This button lets you trigger it MANUALLY from GitHub website anytime
+    # 1:00 PM IST = 7:30 AM UTC
+    - cron: '30 7 * * 1-5'   # Monday to Friday only
   workflow_dispatch:
 
 jobs:
   send-polls:
     runs-on: ubuntu-latest
-
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install requests
+        run: pip install requests groq
 
       - name: Run poll script
         env:
-          PW_USERNAME: ${{ secrets.PW_USERNAME }}
-          PW_PASSWORD: ${{ secrets.PW_PASSWORD }}
+          PW_TOKEN:      ${{ secrets.PW_TOKEN }}
+          ALERT_EMAIL:   ${{ secrets.ALERT_EMAIL }}
+          GMAIL_APP_PWD: ${{ secrets.GMAIL_APP_PWD }}
+          GROQ_API_KEY:  ${{ secrets.GROQ_API_KEY }}
         run: python send_polls.py
