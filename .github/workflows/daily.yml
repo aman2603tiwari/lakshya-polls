@@ -36,6 +36,8 @@ jobs:
       - name: Install dependencies
         run: pip install groq requests pillow
 
+      # Detect mode from the SCHEDULE EXPRESSION that triggered — not the clock.
+      # This is reliable even when GitHub Actions runs late.
       - name: Detect run mode
         id: detect_mode
         run: |
@@ -43,26 +45,31 @@ jobs:
             echo "MODE=${{ github.event.inputs.mode }}" >> $GITHUB_ENV
             echo "Manually triggered: ${{ github.event.inputs.mode }}"
           else
-            HOUR=$(date -u +%H)
-            MINUTE=$(date -u +%M)
-            echo "Current UTC time: ${HOUR}:${MINUTE}"
+            SCHEDULE="${{ github.event.schedule }}"
+            echo "Triggered by schedule: $SCHEDULE"
 
-            if [ "$HOUR" = "02" ]; then
-              echo "MODE=motivation" >> $GITHUB_ENV
-              echo "Detected: motivation (8 AM IST)"
-            elif [ "$HOUR" = "07" ]; then
-              echo "MODE=quiz" >> $GITHUB_ENV
-              echo "Detected: quiz (1 PM IST)"
-            elif [ "$HOUR" = "11" ]; then
-              echo "MODE=checkin" >> $GITHUB_ENV
-              echo "Detected: checkin (5 PM IST)"
-            elif [ "$HOUR" = "16" ]; then
-              echo "MODE=solution" >> $GITHUB_ENV
-              echo "Detected: solution (10 PM IST)"
-            else
-              echo "MODE=motivation" >> $GITHUB_ENV
-              echo "Unknown hour $HOUR — defaulting to motivation"
-            fi
+            case "$SCHEDULE" in
+              "30 2 * * *")
+                echo "MODE=motivation" >> $GITHUB_ENV
+                echo "Detected: motivation (8 AM IST)"
+                ;;
+              "30 7 * * 1-5")
+                echo "MODE=quiz" >> $GITHUB_ENV
+                echo "Detected: quiz (1 PM IST)"
+                ;;
+              "30 11 * * *")
+                echo "MODE=checkin" >> $GITHUB_ENV
+                echo "Detected: checkin (5 PM IST)"
+                ;;
+              "30 16 * * 1-5")
+                echo "MODE=solution" >> $GITHUB_ENV
+                echo "Detected: solution (10 PM IST)"
+                ;;
+              *)
+                echo "MODE=motivation" >> $GITHUB_ENV
+                echo "Unknown schedule '$SCHEDULE' — defaulting to motivation"
+                ;;
+            esac
           fi
 
       - name: Run automation
