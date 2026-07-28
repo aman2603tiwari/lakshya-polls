@@ -1,56 +1,105 @@
-name: Send Daily PW Polls
+name: Lakshya JEE 2027 — Daily Automation
 
 on:
   schedule:
-    # 1:00 PM IST = 7:30 AM UTC — Quiz + polls
-    - cron: '30 7 * * 1-5'
-    # 10:00 PM IST = 4:30 PM UTC — Solutions
-    - cron: '30 16 * * 1-5'
+    - cron: '30 2 * * 1-5'   # 8:00 AM IST  → motivation
+    - cron: '30 7 * * 1-5'   # 1:00 PM IST  → quiz (5 polls)
+    - cron: '30 16 * * 1-5'  # 10:00 PM IST → solutions
+
   workflow_dispatch:
     inputs:
       mode:
-        description: 'Run mode: quiz or solution'
+        description: 'Which mode to run manually'
         required: true
         default: 'quiz'
         type: choice
         options:
+          - motivation
           - quiz
           - solution
 
 jobs:
-  send-polls:
+  run:
     runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
     steps:
-      - uses: actions/checkout@v4
+      # ── 1. Checkout repo ──────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      # ── 2. Setup Python ───────────────────────────────────────────────────
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
+      # ── 3. Install dependencies ───────────────────────────────────────────
       - name: Install dependencies
-        run: pip install requests groq
+        run: pip install groq requests pillow
 
-      - name: Determine mode
-        id: mode
+      # ── 4. Detect mode (auto from schedule OR manual from dispatch) ───────
+      - name: Detect run mode
+        id: detect_mode
         run: |
-          # If manually triggered, use input. Otherwise detect by current UTC hour.
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "mode=${{ github.event.inputs.mode }}" >> $GITHUB_OUTPUT
+            # Manual trigger — use the selected mode
+            echo "MODE=${{ github.event.inputs.mode }}" >> $GITHUB_ENV
+            echo "Manually triggered: ${{ github.event.inputs.mode }}"
           else
+            # Scheduled — detect by current UTC hour
             HOUR=$(date -u +%H)
-            if [ "$HOUR" = "16" ]; then
-              echo "mode=solution" >> $GITHUB_OUTPUT
+            MINUTE=$(date -u +%M)
+            echo "Current UTC time: ${HOUR}:${MINUTE}"
+
+            if [ "$HOUR" = "02" ]; then
+              echo "MODE=motivation" >> $GITHUB_ENV
+              echo "Detected: motivation (8 AM IST)"
+            elif [ "$HOUR" = "07" ]; then
+              echo "MODE=quiz" >> $GITHUB_ENV
+              echo "Detected: quiz (1 PM IST)"
+            elif [ "$HOUR" = "16" ]; then
+              echo "MODE=solution" >> $GITHUB_ENV
+              echo "Detected: solution (10 PM IST)"
             else
-              echo "mode=quiz" >> $GITHUB_OUTPUT
+              echo "MODE=quiz" >> $GITHUB_ENV
+              echo "Unknown hour $HOUR — defaulting to quiz"
             fi
           fi
 
-      - name: Run script
+      # ── 5. Run the script ─────────────────────────────────────────────────
+      - name: Run automation
         env:
           PW_TOKEN:      ${{ secrets.PW_TOKEN }}
+          GROQ_API_KEY:  ${{ secrets.GROQ_API_KEY }}
           ALERT_EMAIL:   ${{ secrets.ALERT_EMAIL }}
           GMAIL_APP_PWD: ${{ secrets.GMAIL_APP_PWD }}
-          GROQ_API_KEY:  ${{ secrets.GROQ_API_KEY }}
-        run: python send_polls.py --mode=${{ steps.mode.outputs.mode }}
+        run: |
+          echo "Running in mode: $MODE"
+          python send_polls.py --mode=$MODE
+
+      # ── 6. Save state files back to repo (quiz writes todays_questions.json)
+      - name: Commit updated state files
+        if: env.MODE == 'quiz'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Only commit if files actually changed
+          git add todays_questions.json history.json 2>/dev/null || true
+
+          if git diff --staged --quiet; then
+            echo "No state changes to commit."
+          else
+            git commit -m "chore: update state files [$(date -u '+%Y-%m-%d %H:%M UTC')]"
+            git push
+          fi
+
+      # ── 7. Upload motivation image as artifact (for debugging/preview) ────
+      - name: Upload motivation image
+        if: env.MODE == 'motivation' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: motivation-image-${{ github.run_id }}
+          path: todays_motivation.jpg
+          if-no-files-found: ignore
+          retention-days: 7

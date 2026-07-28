@@ -1,46 +1,47 @@
 """
-================================================================
-  PW POLL AUTOMATION - LAKSHYA JEE 2027
-  
-  Runs twice daily via two GitHub Actions workflows:
-    1. send_polls.py --mode=quiz     → 1 PM IST  (polls + intro message)
-    2. send_polls.py --mode=solution → 10 PM IST (solutions as chat messages)
+send_polls.py  —  Lakshya JEE 2027 Automation
+===============================================
+Modes:
+  --mode=quiz        (1 PM)  → motivational intro + 5 PYQ polls → all groups
+  --mode=solution    (10 PM) → 5 solution messages → all groups
+  --mode=motivation  (8 AM)  → daily quote message + saves image → all groups
 
-  GitHub Secrets needed:
-    PW_TOKEN, ALERT_EMAIL, GMAIL_APP_PWD, GROQ_API_KEY
-================================================================
+GitHub Secrets required:
+  PW_TOKEN      — Bearer token from pw.live Network tab (expires ~7 days)
+  GROQ_API_KEY  — from console.groq.com
+  ALERT_EMAIL   — your email for failure alerts
+  GMAIL_APP_PWD — 16-char Gmail App Password
 """
 
-import requests
-import time
-import os
-import json
-import smtplib
-import uuid
-import sys
-import re
-from collections import Counter
-from datetime import datetime
+import os, sys, json, random, time, argparse, smtplib, traceback
+from datetime import date, datetime
+from pathlib import Path
 from email.mime.text import MIMEText
+
+import requests
 from groq import Groq
 
-# ── SECRETS ───────────────────────────────────────────────────
-AUTH_TOKEN    = os.environ["PW_TOKEN"]
-ALERT_EMAIL   = os.environ["ALERT_EMAIL"]
-GMAIL_APP_PWD = os.environ["GMAIL_APP_PWD"]
+# ─── SECRETS ──────────────────────────────────────────────────────────────────
+
+PW_TOKEN      = os.environ["PW_TOKEN"]
 GROQ_API_KEY  = os.environ["GROQ_API_KEY"]
+ALERT_EMAIL   = os.environ.get("ALERT_EMAIL", "")
+GMAIL_APP_PWD = os.environ.get("GMAIL_APP_PWD", "")
 
-# ── GROQ ──────────────────────────────────────────────────────
-GROQ_MODEL  = "llama-3.3-70b-versatile"
-GROQ_CLIENT = Groq(api_key=GROQ_API_KEY)
+# ─── PW API CONFIG ────────────────────────────────────────────────────────────
 
-# ── PW CONSTANTS ──────────────────────────────────────────────
+BASE_URL  = "https://api.pw.live"
 CLIENT_ID = "5eb393ee95fab7468a79d189"
 BATCH_ID  = "6779345c20fa0756e4a7fd08"
-API_BASE  = "https://api.penpencil.co"
-DELAY_SEC = 1.5
 
-# ── GROUPS ────────────────────────────────────────────────────
+HEADERS = {
+    "Authorization": f"Bearer {PW_TOKEN}",
+    "Content-Type":  "application/json",
+    "client-id":     CLIENT_ID,
+}
+
+# ─── GROUPS ───────────────────────────────────────────────────────────────────
+
 GROUPS = [
     {"name": "Group 1", "groupId": "69cb7c5e4a6bd7893a91aa22", "conversationId": "69ce5c7c8a5087b50b14c482"},
     {"name": "Group 2", "groupId": "69cb7c67e223436a272111c9", "conversationId": "69ce5d26b3e8f731557c9116"},
@@ -49,489 +50,494 @@ GROUPS = [
     {"name": "Group 5", "groupId": "69cb7c7426c54583a30f3039", "conversationId": "69ce60a65155c4ac4c289fea"},
 ]
 
-SUBJECTS = {
-    "Physics":   "pdfs/physics_pyq.txt",
-    "Chemistry": "pdfs/chemistry_pyq.txt",
-    "Maths":     "pdfs/maths_pyq.txt",
-}
+# ─── SUBJECT ROTATION ─────────────────────────────────────────────────────────
+# Each tuple = (Physics count, Chemistry count, Maths count)
+# Rotates by day-of-week so every day has a different mix
 
-HISTORY_FILE  = "history.json"
-QUESTIONS_FILE = "todays_questions.json"  # quiz mode saves this, solution mode reads it
+SUBJECT_MIXES = [
+    ("Physics", "Physics", "Chemistry", "Chemistry", "Maths"),    # Mon
+    ("Maths",   "Maths",   "Physics",   "Chemistry", "Chemistry"),# Tue
+    ("Chemistry","Chemistry","Maths",   "Maths",     "Physics"),  # Wed
+    ("Physics", "Maths",   "Chemistry", "Physics",   "Maths"),    # Thu
+    ("Maths",   "Physics", "Physics",   "Chemistry", "Maths"),    # Fri
+]
 
-# ── HISTORY ───────────────────────────────────────────────────
+# ─── FILE PATHS ───────────────────────────────────────────────────────────────
 
-def load_history() -> dict:
-    if os.path.exists(HISTORY_FILE):
-        with open(HISTORY_FILE, "r") as f:
-            return json.load(f)
-    return {"used_questions": []}
+HISTORY_FILE   = Path("history.json")
+TODAY_Q_FILE   = Path("todays_questions.json")
+PDF_DIR        = Path("pdfs")
 
+# ─── HELPERS ─────────────────────────────────────────────────────────────────
 
-def save_history(history: dict):
-    with open(HISTORY_FILE, "w") as f:
-        json.dump(history, f, indent=2)
-
-
-# ── SUBJECT MIX ───────────────────────────────────────────────
-
-def get_todays_mix() -> list:
-    mixes = [
-        ["Physics",   "Physics",   "Chemistry", "Chemistry", "Maths"],
-        ["Maths",     "Maths",     "Physics",   "Chemistry", "Chemistry"],
-        ["Chemistry", "Chemistry", "Maths",     "Maths",     "Physics"],
-        ["Physics",   "Maths",     "Chemistry", "Physics",   "Maths"],
-        ["Maths",     "Chemistry", "Physics",   "Chemistry", "Physics"],
-    ]
-    day_index = datetime.now().timetuple().tm_yday % len(mixes)
-    return mixes[day_index]
+def log(msg):
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
 
-# ── SMART TEXT SAMPLING ───────────────────────────────────────
-
-def sample_subject_text(subject: str, max_chars: int = 3000) -> str:
-    path = SUBJECTS[subject]
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"{path} not found. Run extract_pdfs.py and commit the .txt files.")
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        full_text = f.read()
-    total = len(full_text)
-    if total <= max_chars:
-        return full_text
-    import random
-    seed = datetime.now().timetuple().tm_yday * 100 + hash(subject) % 100
-    random.seed(seed)
-    start = random.randint(0, total - max_chars)
-    chunk = full_text[start: start + max_chars]
-    first_newline = chunk.find("\n")
-    if first_newline > 0:
-        chunk = chunk[first_newline:]
-    return chunk.strip()
-
-
-# ── CLEAN RAW JSON FROM GROQ ──────────────────────────────────
-
-def clean_groq_json(raw: str) -> str:
-    """Strip markdown fences and fix LaTeX backslash escapes."""
-    if "```" in raw:
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    raw = raw.strip()
-    # Replace LaTeX commands like \alpha \frac \theta with plain text
-    raw = re.sub(r'\\([a-zA-Z]+)', r' \1 ', raw)
-    # Remove any remaining invalid lone backslashes
-    raw = re.sub(r'\\(?!["\\/bfnrtu])', r' ', raw)
-    return raw.strip()
-
-
-# ── GROQ: GENERATE QUESTIONS ──────────────────────────────────
-
-def generate_questions_via_groq(subject_mix: list, history: dict) -> list:
-    counts = Counter(subject_mix)
-
-    subject_blocks = ""
-    for subj in set(subject_mix):
-        text = sample_subject_text(subj, max_chars=3000)
-        subject_blocks += f"\n--- {subj.upper()} PYQ EXCERPT ---\n{text}\n"
-
-    used_hint = ""
-    if history["used_questions"]:
-        recent = history["used_questions"][-15:]
-        used_hint = "Avoid repeating:\n" + "\n".join(f"- {q}" for q in recent) + "\n\n"
-
-    dist = ", ".join(f"{v} {k}" for k, v in counts.items())
-
-    prompt = f"""You are a JEE question selector for Lakshya JEE 2027. Pick 5 JEE PYQ questions: {dist}.
-
-{used_hint}Rules:
-- Pick actual JEE PYQs from the excerpts below
-- Each question MUST include the exam year AND session in brackets e.g. [JEE Main 2022 June S1], [JEE Adv 2019 P2], [JEE Main 2020 Sep S2]
-- 4 specific answer options each (A, B, C, D) — no vague placeholders
-- correct: 1=A, 2=B, 3=C, 4=D
-- Also include a short step-by-step solution in a "solution" field (2-4 lines max)
-- CRITICAL: Do NOT use LaTeX backslashes like \alpha \frac \theta \sqrt — plain text only
-- Write math as plain text: "alpha" not "\alpha", "x^2" not "\frac", "sqrt(x)" not "\sqrt{{x}}"
-- Backslashes break JSON — plain text only
-
-{subject_blocks}
-
-Reply ONLY with a valid JSON array of exactly 5 objects, no markdown, no backticks, no backslashes:
-[
-  {{
-    "subject": "Physics",
-    "question": "Full question text [JEE Main 2021 Feb S1]",
-    "options": ["option A", "option B", "option C", "option D"],
-    "correct": 2,
-    "solution": "Step 1: ... Step 2: ... Answer: B"
-  }}
-]"""
-
-    print("🤖 Calling Groq for questions...")
-    response = GROQ_CLIENT.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.7,
-        max_tokens=2000,
-    )
-
-    raw = clean_groq_json(response.choices[0].message.content)
-
-    try:
-        questions = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"JSON parse failed: {e}\nRaw:\n{raw[:500]}")
-
-    if len(questions) != 5:
-        raise ValueError(f"Groq returned {len(questions)} questions, need 5")
-
-    for i, q in enumerate(questions):
-        assert "question" in q and q["question"].strip(), f"Q{i+1} missing question"
-        assert "options"  in q and len(q["options"]) == 4, f"Q{i+1} needs 4 options"
-        assert "correct"  in q and 1 <= q["correct"] <= 4, f"Q{i+1} correct must be 1-4"
-        assert "solution" in q and q["solution"].strip(),   f"Q{i+1} missing solution"
-
-    return questions
-
-
-# ── GROQ: GENERATE DAILY INTRO MESSAGE ───────────────────────
-
-def generate_intro_message(subject_mix: list) -> str:
-    counts  = Counter(subject_mix)
-    mix_str = ", ".join(f"{v} {k}" for k, v in counts.items())
-    today   = datetime.now().strftime("%A")
-
-    prompt = f"""Write a short, energetic motivational message for JEE 2027 aspirants.
-It's {today}. Today's quiz has {mix_str} questions.
-Rules:
-- Max 4 lines
-- Encouraging and hype them up to attempt the quiz
-- Mention it's a PYQ-based quiz
-- End with something like "Drop your answers below!" or "Let's go!"
-- No emojis in excess — 1-2 max
-- Vary the style each time so it doesn't feel repetitive
-Just write the message text directly, nothing else."""
-
-    print("🤖 Calling Groq for intro message...")
-    response = GROQ_CLIENT.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.9,
-        max_tokens=150,
-    )
-    return response.choices[0].message.content.strip()
-
-
-# ── EMAIL ─────────────────────────────────────────────────────
-
-def send_alert_email(subject: str, body: str):
+def send_alert(subject, body):
+    """Send Gmail alert on failure."""
+    if not ALERT_EMAIL or not GMAIL_APP_PWD:
+        return
     try:
         msg = MIMEText(body)
         msg["Subject"] = subject
         msg["From"]    = ALERT_EMAIL
         msg["To"]      = ALERT_EMAIL
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-            smtp.login(ALERT_EMAIL, GMAIL_APP_PWD)
-            smtp.send_message(msg)
-        print("📧 Alert email sent!")
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+            s.login(ALERT_EMAIL, GMAIL_APP_PWD)
+            s.send_message(msg)
+        log("Alert email sent.")
     except Exception as e:
-        print(f"⚠️ Email failed: {e}")
+        log(f"[WARN] Email alert failed: {e}")
 
 
-# ── PW HEADERS ────────────────────────────────────────────────
-
-def get_headers() -> dict:
-    return {
-        "Content-Type":    "application/json",
-        "Authorization":   AUTH_TOKEN,
-        "Client-Id":       CLIENT_ID,
-        "Client-Type":     "WEB",
-        "x-sdk-version":   "0.0.20",
-        "randomid":        str(uuid.uuid4()),
-        "Origin":          "https://www.pw.live",
-        "Referer":         "https://www.pw.live/",
-        "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
-        "Accept":          "*/*",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-
-
-def check_token_valid():
-    res = requests.get(f"{API_BASE}/v1/users/get-user-detail",
-                       headers=get_headers(), timeout=10)
-    if res.status_code == 401:
-        raise RuntimeError("TOKEN_EXPIRED")
-
-
-# ── PW: SEND CHAT MESSAGE ─────────────────────────────────────
-
-def send_chat_message(group: dict, text: str):
-    """Send a plain text message to a group chat."""
-    url = f"{API_BASE}/v1/conversation/{group['conversationId']}/chat"
-    payload = {
-        "batchId": BATCH_ID,
-        "groupId": group["groupId"],
-        "role":    "Mentor",
-        "text":    text,
-        "type":    "text",
-    }
-    res = requests.post(url, json=payload, headers=get_headers(), timeout=10)
-    if res.status_code not in (200, 201):
-        raise RuntimeError(f"chat message failed ({res.status_code}): {res.text[:200]}")
-
-
-# ── PW: CREATE + POST POLL ────────────────────────────────────
-
-def create_poll(group: dict, poll: dict) -> dict:
-    url = f"{API_BASE}/v2/poll/create-poll"
-    payload = {
-        "type":          "SINGLE",
-        "entityType":    "mentorship",
-        "entityId":      group["groupId"],
-        "poll_question": poll["question"],
-        "correctOption": [poll["correct"]],
-        "pollOptions": [
-            {"option_id": i+1, "option_label": opt, "option_description": opt}
-            for i, opt in enumerate(poll["options"])
-        ],
-    }
-    res = requests.post(url, json=payload, headers=get_headers(), timeout=10)
-    if res.status_code not in (200, 201):
-        print(f"    [DEBUG] {res.status_code}: {res.text[:300]}")
-        raise RuntimeError(f"create-poll failed ({res.status_code}): {res.text[:200]}")
+def load_json(path, default):
     try:
-        data = res.json()
+        return json.loads(Path(path).read_text())
     except Exception:
-        raise RuntimeError(f"non-JSON response: {res.text[:200]}")
-    if data.get("data", {}).get("pollId"):
-        return data["data"]
-    raise RuntimeError(f"no pollId: {data}")
+        return default
 
 
-def post_poll_to_chat(group: dict, poll: dict, poll_data: dict):
-    url = f"{API_BASE}/v1/conversation/{group['conversationId']}/chat"
-    poll_options_str = json.dumps({
-        "pollId":        poll_data["pollId"],
-        "type":          "SINGLE",
-        "pollOptions": [
-            {"option_id": i+1, "option_label": opt, "option_description": opt}
-            for i, opt in enumerate(poll["options"])
-        ],
-        "correctOption": [poll["correct"]],
-    })
+def save_json(path, data):
+    Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+# ─── PW API CALLS ─────────────────────────────────────────────────────────────
+
+def check_token():
+    """Verify PW token is still valid."""
+    try:
+        r = requests.get(
+            f"{BASE_URL}/v2/user/profile",
+            headers=HEADERS, timeout=10
+        )
+        if r.status_code == 200:
+            log("✅ Token valid.")
+            return True
+        else:
+            log(f"❌ Token check failed: {r.status_code} {r.text[:200]}")
+            return False
+    except Exception as e:
+        log(f"❌ Token check error: {e}")
+        return False
+
+
+def send_message(group, text):
+    """Send a plain text message to a group."""
     payload = {
-        "batchId":     BATCH_ID,
-        "groupId":     group["groupId"],
-        "role":        "Mentor",
-        "text":        poll["question"],
-        "type":        "poll",
-        "pollOptions": poll_options_str,
+        "groupId":        group["groupId"],
+        "conversationId": group["conversationId"],
+        "batchId":        BATCH_ID,
+        "messageType":    "text",
+        "message":        text,
     }
-    res = requests.post(url, json=payload, headers=get_headers(), timeout=10)
-    if res.status_code not in (200, 201):
-        print(f"    [DEBUG] {res.status_code}: {res.text[:300]}")
-        raise RuntimeError(f"chat post failed ({res.status_code}): {res.text[:200]}")
-
-
-# ── MODE: QUIZ (1 PM) ─────────────────────────────────────────
-
-def run_quiz_mode():
-    today      = datetime.now().strftime("%A, %d %B %Y")
-    history    = load_history()
-    subject_mix = get_todays_mix()
-    counts     = Counter(subject_mix)
-
-    print(f"📚 {len(history['used_questions'])} questions used so far")
-    print(f"📐 Today's mix: {dict(counts)}\n")
-
-    # Generate questions
     try:
-        questions = generate_questions_via_groq(subject_mix, history)
-        print(f"✅ {len(questions)} questions generated:")
-        for i, q in enumerate(questions):
-            print(f"   Q{i+1} [{q.get('subject','?')}]: {q['question'][:65]}...")
-        print()
+        r = requests.post(
+            f"{BASE_URL}/v2/messaging/send-message",
+            headers=HEADERS, json=payload, timeout=15
+        )
+        if r.status_code in (200, 201):
+            log(f"  ✅ Message → {group['name']}")
+        else:
+            log(f"  ⚠️  Message failed → {group['name']}: {r.status_code} {r.text[:150]}")
     except Exception as e:
-        msg = f"Groq question generation failed: {e}"
-        print(f"❌ {msg}")
-        send_alert_email("🔴 Lakshya Polls — Groq Error", msg)
-        exit(1)
+        log(f"  ❌ Message error → {group['name']}: {e}")
+    time.sleep(1)
 
-    # Save today's questions for solution mode at 10 PM
-    with open(QUESTIONS_FILE, "w") as f:
-        json.dump(questions, f, indent=2)
-    print(f"💾 Saved questions to {QUESTIONS_FILE}\n")
 
-    # Generate intro message
+def send_poll(group, question):
+    """Send a single poll to a group."""
+    options = question["options"]   # list of 4 strings
+    correct = question["correct"]   # 1-indexed int
+
+    payload = {
+        "groupId":        group["groupId"],
+        "conversationId": group["conversationId"],
+        "batchId":        BATCH_ID,
+        "question":       question["question"],
+        "options":        [{"text": opt} for opt in options],
+        "correctOption":  correct - 1,   # 0-indexed for API
+        "duration":       86400,         # poll open for 24 hours
+    }
     try:
-        intro = generate_intro_message(subject_mix)
-        print(f"💬 Intro message:\n{intro}\n")
+        r = requests.post(
+            f"{BASE_URL}/v2/poll/create-poll",
+            headers=HEADERS, json=payload, timeout=15
+        )
+        if r.status_code in (200, 201):
+            log(f"  ✅ Poll sent → {group['name']}: {question['question'][:50]}...")
+        else:
+            log(f"  ⚠️  Poll failed → {group['name']}: {r.status_code} {r.text[:150]}")
     except Exception as e:
-        intro = "Today's PYQ Quiz is live! 5 questions across Physics, Chemistry & Maths. Attempt all and drop your answers below! 🔥"
-        print(f"⚠️ Groq intro failed, using fallback: {e}")
+        log(f"  ❌ Poll error → {group['name']}: {e}")
+    time.sleep(1.5)
+
+
+# ─── GROQ HELPERS ─────────────────────────────────────────────────────────────
+
+groq_client = Groq(api_key=GROQ_API_KEY)
+
+
+def sample_pyq_text(subject, chars=3000):
+    """Sample a random chunk from the subject's PYQ text file."""
+    fname = PDF_DIR / f"{subject.lower()}_pyq.txt"
+    if not fname.exists():
+        return f"[No PYQ file found for {subject} — using general JEE knowledge]"
+    text = fname.read_text(encoding="utf-8", errors="ignore")
+    if len(text) <= chars:
+        return text
+    start = random.randint(0, len(text) - chars)
+    return text[start: start + chars]
+
+
+def generate_questions(subjects):
+    """
+    Ask Groq to generate 5 JEE PYQ questions (one per subject slot).
+    Returns list of dicts: {subject, question, options[4], correct(1-4),
+                             solution, year_tag}
+    """
+    subject_list = "\n".join(
+        f"Q{i+1}: {subj}" for i, subj in enumerate(subjects)
+    )
+
+    pyq_samples = {}
+    for subj in set(subjects):
+        pyq_samples[subj] = sample_pyq_text(subj)
+
+    context_block = "\n\n".join(
+        f"=== {subj} PYQ SAMPLE ===\n{text}"
+        for subj, text in pyq_samples.items()
+    )
+
+    prompt = f"""You are a JEE question expert. Generate exactly 5 JEE PYQ (previous year questions) based on the sample material below.
+
+Subject assignment for each question:
+{subject_list}
+
+PYQ MATERIAL:
+{context_block}
+
+STRICT RULES:
+- Each question MUST include the year and session tag, e.g. [JEE Main 2022 June S1] or [JEE Adv 2019 P2]
+- 4 options per question (A, B, C, D)
+- correct is 1-4 (1=A, 2=B, 3=C, 4=D)
+- solution must have step-by-step working (3-5 steps)
+- No LaTeX backslashes — write math in plain text (e.g. "v^2 = u^2 + 2as" not "\\v^2")
+- Questions must be from actual JEE papers, not invented
+
+Return ONLY a JSON array, no markdown, no explanation:
+[
+  {{
+    "subject": "Physics",
+    "year_tag": "[JEE Main 2023 Jan S2]",
+    "question": "full question text with year tag at start",
+    "options": ["option A text", "option B text", "option C text", "option D text"],
+    "correct": 2,
+    "solution": "Step 1: ...\\nStep 2: ...\\nStep 3: ..."
+  }},
+  ...5 items total
+]"""
+
+    resp = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3,
+        max_tokens=3000,
+        response_format={"type": "json_object"},
+    )
+
+    raw = resp.choices[0].message.content.strip()
+
+    # Handle both array and wrapped object responses
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return parsed
+        # Groq sometimes wraps in {"questions": [...]}
+        for key in parsed:
+            if isinstance(parsed[key], list):
+                return parsed[key]
+    except Exception as e:
+        log(f"[WARN] Question JSON parse error: {e}")
+
+    return []
+
+
+def generate_intro_message(subjects):
+    """Ask Groq to write a fresh daily motivational intro message."""
+    subject_str = ", ".join(subjects)
+    prompt = f"""Write a short, energetic motivational message to send to JEE aspirants before their daily quiz.
+
+Today's subjects: {subject_str}
+Today's date: {date.today().strftime('%A, %d %B %Y')}
+
+Rules:
+- 3-5 lines max
+- Mention the subjects naturally
+- End with hype to answer the polls ("Drop your answers below!", "Let's see how many you get right!" etc.)
+- Sound like a real teacher/mentor, not corporate motivation
+- Different every day — be creative
+- English only
+
+Return ONLY the message text, no quotes, no explanation."""
+
+    resp = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.9,
+        max_tokens=150,
+    )
+    return resp.choices[0].message.content.strip()
+
+
+def generate_motivation_quote():
+    """Generate a high-quality JEE motivation quote (English only)."""
+    system = """You write deeply authentic motivational quotes for JEE/IIT aspirants in ENGLISH ONLY.
+
+Your quotes must feel RAW and REAL — like something a JEE topper or a struggling-but-hungry student actually thinks at 2 AM, NOT a LinkedIn post.
+
+STRICT RULES:
+✅ English only
+✅ Specific to JEE reality: mock ranks, rank drops, 3 AM studying, Kota pressure, PCM, parents sacrifices
+✅ 1-4 lines max. Punchy. No essays.
+✅ Emotion first — the student must FEEL seen, not lectured
+
+BANNED: "Never give up", "Believe in yourself", "Work hard", any generic cliché
+
+GREAT EXAMPLES:
+- "Your rank dropped 3000. Your parents said nothing. That silence is the heaviest weight you'll carry into that exam room."
+- "The integration you couldn't solve at midnight — that's the one on JEE paper. Sit back down."
+- "Every topper in that rank list had a night they wanted to quit. You're in that night right now. Stay."
+- "The student who scores 99 percentile doesn't work harder than you. They waste less."
+
+Return ONLY a JSON object:
+{"quote": "the quote text, use \\n for line breaks between lines"}"""
+
+    categories = [
+        "discipline_and_consistency", "exam_pressure_and_fear",
+        "parents_sacrifice", "comeback_after_failure",
+        "late_night_study_grind", "mock_test_mindset",
+        "iit_dream_visualization", "competition_mindset",
+        "time_management", "mental_toughness",
+    ]
+    cat = categories[date.today().toordinal() % len(categories)]
+
+    resp = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user",   "content": f"Category: {cat}\nSeed: {date.today().toordinal()}"},
+        ],
+        temperature=0.88,
+        max_tokens=200,
+        response_format={"type": "json_object"},
+    )
+    raw = resp.choices[0].message.content.strip()
+    try:
+        return json.loads(raw).get("quote", raw)
+    except Exception:
+        return raw
+
+
+# ─── MODE: MOTIVATION (8 AM) ──────────────────────────────────────────────────
+
+def run_motivation():
+    log("=== MODE: MOTIVATION (8 AM) ===")
+
+    log("Generating quote via Groq...")
+    quote = generate_motivation_quote()
+    log(f"Quote: {quote[:80]}...")
+
+    # Format the morning message
+    morning_msg = (
+        f"🌅 Good Morning, Lakshya JEE 2027!\n\n"
+        f'"{quote}"\n\n'
+        f"📚 Today's polls drop at 1 PM — be ready!"
+    )
 
     # Send to all groups
-    total   = len(questions) * len(GROUPS)
-    success = 0
-    fail    = 0
-    failures = []
-
-    print(f"📋 Sending: 1 intro + {len(questions)} polls × {len(GROUPS)} groups\n")
-
     for group in GROUPS:
-        print(f"📂 {group['name']}")
+        log(f"Sending to {group['name']}...")
+        send_message(group, morning_msg)
 
-        # Send intro message first
-        try:
-            send_chat_message(group, intro)
-            print(f"  💬 Intro message sent")
+    # Also generate and save the image (for future PW media upload)
+    try:
+        from generate_motivation import render
+        from PIL import Image
+        quote_data = {"quote": quote, "style": "fierce"}
+        img = render(quote_data)
+        img.save("todays_motivation.jpg", "JPEG", quality=96)
+        log("Motivation image saved → todays_motivation.jpg")
+    except Exception as e:
+        log(f"[WARN] Image generation skipped: {e}")
+
+    log("✅ Motivation mode complete.")
+
+
+# ─── MODE: QUIZ (1 PM) ────────────────────────────────────────────────────────
+
+def run_quiz():
+    log("=== MODE: QUIZ (1 PM) ===")
+
+    # Load history (tracks used question hashes)
+    history = load_json(HISTORY_FILE, {"used": []})
+
+    # Pick today's subject mix by weekday (Mon=0 ... Fri=4)
+    weekday = date.today().weekday()
+    subjects = list(SUBJECT_MIXES[weekday % len(SUBJECT_MIXES)])
+    log(f"Today's subjects: {subjects}")
+
+    # Generate questions
+    log("Generating questions via Groq...")
+    questions = []
+    attempts  = 0
+    while len(questions) < 5 and attempts < 3:
+        attempts += 1
+        qs = generate_questions(subjects)
+        if qs and len(qs) >= 5:
+            questions = qs[:5]
+            break
+        log(f"[WARN] Attempt {attempts}: got {len(qs)} questions, retrying...")
+        time.sleep(2)
+
+    if len(questions) < 5:
+        msg = f"Quiz mode failed — only got {len(questions)}/5 questions after {attempts} attempts."
+        log(f"❌ {msg}")
+        send_alert("❌ Lakshya Poll Automation FAILED", msg)
+        sys.exit(1)
+
+    log(f"✅ Got {len(questions)} questions.")
+
+    # Generate intro message
+    log("Generating intro message...")
+    intro = generate_intro_message(subjects)
+    log(f"Intro: {intro[:80]}...")
+
+    # Send to all groups
+    for group in GROUPS:
+        log(f"\n── Sending to {group['name']} ──")
+
+        # 1. Intro message
+        send_message(group, f"📢 {intro}")
+        time.sleep(1)
+
+        # 2. Five polls
+        for i, q in enumerate(questions):
+            log(f"  Poll {i+1}/5: [{q.get('subject','')}] {q['question'][:50]}...")
+            send_poll(group, q)
             time.sleep(1)
-        except Exception as e:
-            print(f"  ⚠️ Intro message failed: {e}")
 
-        # Send 5 polls
-        for i, poll in enumerate(questions):
-            try:
-                poll_data = create_poll(group, poll)
-                post_poll_to_chat(group, poll, poll_data)
-                print(f"  ✅ Poll {i+1} [{poll.get('subject','?')}] → sent")
-                success += 1
-            except Exception as e:
-                err = f"Poll {i+1} → {group['name']}: {e}"
-                print(f"  ❌ {err}")
-                failures.append(err)
-                fail += 1
-            time.sleep(DELAY_SEC)
+    # Save today's questions for 10 PM solution mode
+    save_json(TODAY_Q_FILE, questions)
+    log(f"Saved → {TODAY_Q_FILE}")
 
     # Update history
     for q in questions:
-        fp = q["question"][:80]
-        if fp not in history["used_questions"]:
-            history["used_questions"].append(fp)
-    save_history(history)
-    print(f"\n📝 History updated — {len(history['used_questions'])} total")
-    print(f"🎉 Quiz mode done! {success} sent, {fail} failed out of {total}.")
+        qhash = str(hash(q["question"][:50]))
+        if qhash not in history["used"]:
+            history["used"].append(qhash)
+    # Keep only last 500 to avoid file bloat
+    history["used"] = history["used"][-500:]
+    save_json(HISTORY_FILE, history)
+    log(f"History updated ({len(history['used'])} entries).")
 
-    if fail > 0:
-        send_alert_email(
-            f"⚠️ Lakshya Polls — {fail} failed",
-            f"Sent: {success}/{total}\nFailed: {fail}/{total}\n\n" + "\n".join(f"• {f}" for f in failures)
-        )
-        exit(1)
-    else:
-        send_alert_email(
-            f"✅ Lakshya Polls — All {success} sent!",
-            f"{today}\nMix: {dict(counts)}\n\n"
-            + "\n".join(f"Q{i+1} [{q.get('subject','?')}]: {q['question'][:80]}" for i, q in enumerate(questions))
-        )
+    log("✅ Quiz mode complete.")
 
 
-# ── MODE: SOLUTION (10 PM) ────────────────────────────────────
+# ─── MODE: SOLUTION (10 PM) ───────────────────────────────────────────────────
 
-def run_solution_mode():
-    today = datetime.now().strftime("%A, %d %B %Y")
+def run_solution():
+    log("=== MODE: SOLUTION (10 PM) ===")
 
-    # Load today's questions
-    if not os.path.exists(QUESTIONS_FILE):
-        msg = f"todays_questions.json not found — quiz mode may not have run today."
-        print(f"❌ {msg}")
-        send_alert_email("🔴 Lakshya Solutions — Missing questions file", msg)
-        exit(1)
+    if not TODAY_Q_FILE.exists():
+        msg = "todays_questions.json not found — quiz mode may have failed today."
+        log(f"❌ {msg}")
+        send_alert("❌ Solution mode failed — no questions file", msg)
+        sys.exit(1)
 
-    with open(QUESTIONS_FILE, "r") as f:
-        questions = json.load(f)
+    questions = load_json(TODAY_Q_FILE, [])
+    if not questions:
+        log("❌ Questions file is empty.")
+        sys.exit(1)
 
-    print(f"📖 Loaded {len(questions)} questions from {QUESTIONS_FILE}\n")
-
-    option_labels = ["A", "B", "C", "D"]
-    success = 0
-    fail    = 0
-    failures = []
-
-    total = len(questions) * len(GROUPS)
-    print(f"📋 Sending {len(questions)} solutions × {len(GROUPS)} groups = {total} messages\n")
+    log(f"Loaded {len(questions)} questions.")
 
     for group in GROUPS:
-        print(f"📂 {group['name']}")
+        log(f"\n── Sending solutions to {group['name']} ──")
 
-        # Send opening line
-        try:
-            send_chat_message(group, "✅ Solutions to today's quiz are here! Check your answers 👇")
-            time.sleep(1)
-        except Exception as e:
-            print(f"  ⚠️ Opening message failed: {e}")
+        # Opening line
+        send_message(group, "🎯 Today's Poll Solutions — Check how you did!")
+        time.sleep(1)
 
-        # Send one message per question
         for i, q in enumerate(questions):
-            correct_label = option_labels[q["correct"] - 1]
-            correct_text  = q["options"][q["correct"] - 1]
+            subject = q.get("subject", "")
+            opts    = q.get("options", [])
+            correct = q.get("correct", 1)   # 1-indexed
+            soln    = q.get("solution", "No solution available.")
+            year_tag= q.get("year_tag", "")
 
-            msg_text = (
-                f"Q{i+1} Solution [{q.get('subject', '?')}]\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
+            # Build correct answer label
+            letters = ["A", "B", "C", "D"]
+            correct_letter = letters[correct - 1] if 1 <= correct <= 4 else "?"
+            correct_text   = opts[correct - 1] if opts else ""
+
+            sol_msg = (
+                f"Q{i+1} Solution [{subject}] {year_tag}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"{q['question']}\n\n"
-                f"✅ Correct Answer: ({correct_label}) {correct_text}\n\n"
-                f"📝 Explanation:\n{q.get('solution', 'See standard solution.')}"
+                f"✅ Correct Answer: ({correct_letter}) {correct_text}\n\n"
+                f"📝 Explanation:\n{soln}"
             )
 
-            try:
-                send_chat_message(group, msg_text)
-                print(f"  ✅ Solution {i+1} sent")
-                success += 1
-            except Exception as e:
-                err = f"Solution {i+1} → {group['name']}: {e}"
-                print(f"  ❌ {err}")
-                failures.append(err)
-                fail += 1
-            time.sleep(DELAY_SEC)
+            send_message(group, sol_msg)
+            time.sleep(1.5)
 
-    print(f"\n🎉 Solution mode done! {success} sent, {fail} failed out of {total}.")
-
-    if fail > 0:
-        send_alert_email(
-            f"⚠️ Lakshya Solutions — {fail} failed",
-            f"Sent: {success}/{total}\nFailed: {fail}/{total}\n\n" + "\n".join(f"• {f}" for f in failures)
-        )
-        exit(1)
-    else:
-        send_alert_email(
-            f"✅ Lakshya Solutions — All {success} sent!",
-            f"{today}\n\nSolutions delivered to all 5 groups successfully."
-        )
+    log("✅ Solution mode complete.")
 
 
-# ── MAIN ──────────────────────────────────────────────────────
+# ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 def main():
-    mode = "quiz"
-    if len(sys.argv) > 1 and sys.argv[1] == "--mode=solution":
-        mode = "solution"
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--mode",
+        choices=["quiz", "solution", "motivation"],
+        required=True,
+        help="Which mode to run"
+    )
+    args = parser.parse_args()
 
-    today = datetime.now().strftime("%A, %d %B %Y")
-    print(f"🚀 PW Automation — Lakshya JEE 2027 [{mode.upper()} MODE]")
-    print(f"📅 {today}\n")
+    log(f"Starting in mode: {args.mode.upper()}")
 
-    # Token check
+    # Validate token for all modes
+    if not check_token():
+        msg = (
+            f"PW_TOKEN is invalid or expired!\n\n"
+            f"To refresh:\n"
+            f"1. Open pw.live → go to any group\n"
+            f"2. Create a test poll manually\n"
+            f"3. F12 → Network → find POST to v2/poll/create-poll\n"
+            f"4. Copy Authorization header value\n"
+            f"5. Update PW_TOKEN secret in GitHub repo settings"
+        )
+        send_alert("⚠️ Lakshya Automation — Token Expired", msg)
+        sys.exit(1)
+
     try:
-        check_token_valid()
-        print("✅ Token is valid\n")
-    except RuntimeError as e:
-        if "TOKEN_EXPIRED" in str(e):
-            msg = (
-                "TOKEN EXPIRED\n\n"
-                "Fix:\n"
-                "1. pw.live → any group → manually create one poll\n"
-                "2. F12 → Network → POST create-poll → copy Authorization header\n"
-                "3. GitHub Secrets → PW_TOKEN → Update\n"
-                "4. Actions → Run workflow\n"
-            )
-            print(msg)
-            send_alert_email("🔴 Lakshya — Token Expired", msg)
-            exit(1)
-
-    if mode == "quiz":
-        run_quiz_mode()
-    else:
-        run_solution_mode()
+        if args.mode == "motivation":
+            run_motivation()
+        elif args.mode == "quiz":
+            run_quiz()
+        elif args.mode == "solution":
+            run_solution()
+    except Exception as e:
+        err = traceback.format_exc()
+        log(f"❌ FATAL ERROR:\n{err}")
+        send_alert(
+            f"❌ Lakshya Automation CRASHED ({args.mode} mode)",
+            f"Error: {e}\n\nTraceback:\n{err}"
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":
