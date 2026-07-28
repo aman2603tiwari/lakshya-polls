@@ -2,7 +2,7 @@ name: Lakshya JEE 2027 — Daily Automation
 
 on:
   schedule:
-    - cron: '30 2 * * 1-5'   # 8:00 AM IST  → motivation
+    - cron: '30 2 * * *'     # 8:00 AM IST  → motivation (every day)  
     - cron: '30 7 * * 1-5'   # 1:00 PM IST  → quiz (5 polls)
     - cron: '30 16 * * 1-5'  # 10:00 PM IST → solutions
 
