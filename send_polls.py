@@ -138,10 +138,13 @@ def generate_questions_via_groq(subject_mix: list, history: dict) -> list:
 - 4 specific options each (not placeholders)
 - correct: 1=A 2=B 3=C 4=D
 - Add year tag e.g. [JEE 2019]
+- CRITICAL: Do NOT use LaTeX backslashes like \alpha \frac \theta \sqrt
+- Write math in plain text only: use "alpha" not "\alpha", "x^2" not "x squared with frac"
+- Backslashes WILL break the JSON — plain text only
 
 {subject_blocks}
 
-Reply ONLY with a JSON array of 5 objects, no markdown:
+Reply ONLY with a JSON array of 5 objects, no markdown, no backslashes:
 [{{"subject":"Physics","question":"...","options":["...","...","...","..."],"correct":1}}]"""
 
     print("🤖 Calling Groq...")
@@ -161,7 +164,19 @@ Reply ONLY with a JSON array of 5 objects, no markdown:
             raw = raw[4:]
     raw = raw.strip()
 
-    questions = json.loads(raw)
+    # Fix invalid JSON escape sequences from LaTeX math
+    # e.g. \alpha, \frac, \theta etc. → replace backslash with space
+    import re
+    # Replace LaTeX commands like \alpha \frac \sqrt etc. with safe versions
+    raw = re.sub(r'\\([a-zA-Z]+)', r' \1 ', raw)
+    # Remove any remaining lone backslashes that aren't valid JSON escapes
+    raw = re.sub(r'\\(?!["\\/bfnrtu])', r' ', raw)
+
+    try:
+        questions = json.loads(raw)
+    except json.JSONDecodeError as e:
+        # Last resort: try ast.literal_eval or raise with raw for debugging
+        raise ValueError(f"JSON parse failed: {e}\nRaw response:\n{raw[:500]}")
 
     if len(questions) != 5:
         raise ValueError(f"Groq returned {len(questions)} questions, need 5")
