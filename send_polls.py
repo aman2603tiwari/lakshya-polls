@@ -396,7 +396,7 @@ Rules:
 - Mention today's subjects naturally
 - End with hype to answer the polls
 - Sound like a real caring teacher/mentor
-- English only, fresh and different every day
+- Use Hinglish or English, fresh and different every day
 - Don't use any quotes "" or''
 
 Return ONLY the message text."""
@@ -459,10 +459,10 @@ Photo filename hint: {photo_name}
 Seed for variety: {date.today().toordinal()}
 
 Rules:
-- 1-3 lines max
+- 1-2 lines max
 - Make the student WANT to be there
-- Casual, real tone
-- English only, no hashtags
+- Casual, real tone in Hinglish
+- No hashtags
 
 Return ONLY the caption text."""
     resp = groq_client.chat.completions.create(
@@ -489,7 +489,7 @@ Rules:
 - Sound like a caring mentor
 - Casual and warm tone
 - 4-6 lines max
-- English only
+- Use English Or Hinglish
 - End with invitation to reply
 
 Return ONLY the message text."""
@@ -516,7 +516,7 @@ Rules:
 - Warm reflective tone
 - Make students feel safe to share honestly
 - 5-7 lines max
-- English only
+- Use HInglish or English
 
 Return ONLY the message text."""
     resp = groq_client.chat.completions.create(
