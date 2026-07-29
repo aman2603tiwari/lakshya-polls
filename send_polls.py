@@ -392,11 +392,12 @@ Today's subjects: {subject_str}
 Today's date: {date.today().strftime('%A, %d %B %Y')}
 
 Rules:
-- 3-5 lines max
+- 1-2 lines max
 - Mention today's subjects naturally
 - End with hype to answer the polls
 - Sound like a real caring teacher/mentor
 - English only, fresh and different every day
+- Don't use any quotes "" or''
 
 Return ONLY the message text."""
     resp = groq_client.chat.completions.create(
