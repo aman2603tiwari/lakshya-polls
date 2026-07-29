@@ -332,6 +332,7 @@ RULES:
 - correct is 1-4 (1=A, 2=B, 3=C, 4=D)
 - solution: 3-5 step working in plain text
 - CRITICAL: Do NOT use LaTeX backslashes like \\alpha \\frac \\theta \\sqrt
+- DO NOT USE QUESTIONS WHERE IMAGES ARE REFFERED OR PRESENT 
 - Write math in plain text: "alpha" not "\\alpha", "x^2" not "x squared"
 - Backslashes break JSON parsing — plain text only
 
@@ -488,7 +489,7 @@ Seed: {date.today().toordinal()}
 Rules:
 - Sound like a caring mentor
 - Casual and warm tone
-- 4-6 lines max
+- 1-2 lines max
 - Use English Or Hinglish
 - End with invitation to reply
 
@@ -515,7 +516,7 @@ Seed: {date.today().toordinal()}
 Rules:
 - Warm reflective tone
 - Make students feel safe to share honestly
-- 5-7 lines max
+- 2-3 lines max
 - Use HInglish or English
 
 Return ONLY the message text."""
@@ -673,7 +674,7 @@ def run_checkin():
     else:
         log("Generating daily checkin...")
         message       = generate_daily_checkin_message()
-        header        = "👋 Evening Check-In"
+        header        = ""
         email_subject = "✅ Daily Checkin Sent"
 
     log(f"Message: {message[:80]}...")

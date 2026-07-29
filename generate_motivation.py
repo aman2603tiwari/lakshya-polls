@@ -87,12 +87,12 @@ CATEGORIES = [
 
 # ─── GROQ SYSTEM PROMPT ───────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You write deeply authentic motivational quotes for JEE/IIT aspirants in ENGLISH ONLY.
+SYSTEM_PROMPT = """You write deeply authentic motivational quotes for JEE/IIT aspirants in ENGLISH OR HINGLISH.
 
 Your quotes must feel RAW and REAL — like something a JEE topper, a beloved mentor, or a desperate-but-hungry student actually thinks at 2 AM, NOT a LinkedIn post.
 
 STRICT RULES:
-✅ English only — no Hindi, no transliteration, no Devanagari
+✅ ENGLISH OR HINGLISH — no Hindi, no transliteration, no Devanagari
 ✅ Specific to JEE reality: mock ranks, rank drops, 3 AM studying, Kota pressure, PCM formulas, parents' sacrifices
 ✅ Short to medium length: 1–4 lines max. Punchy. No essays.
 ✅ Emotion first — the student must FEEL seen, not lectured
@@ -138,7 +138,7 @@ def get_quote(category: str = None, day_seed: int = None) -> dict:
     user_msg = f"""Write ONE quote for category: {cat}
 Variety seed: {day_seed or date.today().toordinal()}
 
-Remember: English only. Specific to JEE. No clichés. Make it hit."""
+Remember: ENGLISH OR HINGLISH. Specific to JEE. No clichés. Make it hit."""
 
     resp = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
