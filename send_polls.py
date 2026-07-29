@@ -363,12 +363,20 @@ Return ONLY a JSON array of exactly 5 objects, no markdown, no backticks:
 
     try:
         parsed = json.loads(raw)
+        # If it's already a list
         if isinstance(parsed, list):
             return parsed
-        # Groq sometimes wraps array in an object
+        # Groq wraps in object — find the list value
         for key in parsed:
-            if isinstance(parsed[key], list):
-                return parsed[key]
+            val = parsed[key]
+            if isinstance(val, list) and len(val) > 0:
+                # Make sure items have 'question' key
+                if isinstance(val[0], dict) and "question" in val[0]:
+                    return val
+        # Last resort — if there's only one key and it's a list
+        vals = [v for v in parsed.values() if isinstance(v, list)]
+        if vals:
+            return vals[0]
     except Exception as e:
         log(f"[WARN] Question JSON parse error: {e}\nRaw: {raw[:300]}")
     return []
@@ -570,7 +578,7 @@ def run_quiz():
 
     log(f"✅ Got {len(questions)} questions.")
     for i, q in enumerate(questions):
-        log(f"   Q{i+1} [{q.get('subject','')}]: {q['question'][:65]}...")
+        log(f"   Q{i+1} [{q.get('subject','')}]: {q.get('question','N/A')[:65]}...")
 
     intro = generate_intro_message(subjects)
     log(f"Intro: {intro[:80]}...")
