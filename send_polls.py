@@ -2,7 +2,7 @@
 send_polls.py  —  Lakshya JEE 2027 Automation
 ===============================================
 Modes:
-  --mode=motivation  (8 AM daily)        → motivation image → all groups
+  --mode=motivation  (8 AM daily)        → motivation quote text → all groups
   --mode=quiz        (1 PM Mon-Fri)      → intro + 5 PYQ polls → all groups
   --mode=checkin     (5 PM daily)        → daily checkin / Saturday weekly review
   --mode=solution    (10 PM Mon-Fri)     → 5 solution messages → all groups
@@ -14,7 +14,7 @@ GitHub Secrets required:
   GDRIVE_FOLDER_ID  — ID of the Drive folder containing college photos
 """
 
-import os, sys, json, random, time, argparse, smtplib, traceback, tempfile
+import os, sys, json, random, time, argparse, smtplib, traceback
 from datetime import date, datetime
 from pathlib import Path
 from email.mime.text import MIMEText
@@ -38,13 +38,13 @@ CLIENT_ID = "5eb393ee95fab7468a79d189"
 BATCH_ID  = "6779345c20fa0756e4a7fd08"
 
 HEADERS = {
-    "Authorization":  f"Bearer {PW_TOKEN}",
-    "client-id":      CLIENT_ID,
-    "client-type":    "WEB",
-    "origin":         "https://www.pw.live",
-    "referer":        "https://www.pw.live/",
-    "x-sdk-version":  "0.0.28",
-    "randomid":       "2f81cbed-4d22-4f57-994e-3f78dbf6e309",
+    "Authorization": f"Bearer {PW_TOKEN}",
+    "client-id":     CLIENT_ID,
+    "client-type":   "WEB",
+    "origin":        "https://www.pw.live",
+    "referer":       "https://www.pw.live/",
+    "x-sdk-version": "0.0.28",
+    "randomid":      "2f81cbed-4d22-4f57-994e-3f78dbf6e309",
 }
 
 JSON_HEADERS = {**HEADERS, "Content-Type": "application/json"}
@@ -71,10 +71,10 @@ SUBJECT_MIXES = [
 
 # ─── FILE PATHS ───────────────────────────────────────────────────────────────
 
-HISTORY_FILE      = Path("history.json")
-TODAY_Q_FILE      = Path("todays_questions.json")
-SENT_PHOTOS_FILE  = Path("sent_photos.json")
-PDF_DIR           = Path("pdfs")
+HISTORY_FILE     = Path("history.json")
+TODAY_Q_FILE     = Path("todays_questions.json")
+SENT_PHOTOS_FILE = Path("sent_photos.json")
+PDF_DIR          = Path("pdfs")
 
 # ─── HELPERS ──────────────────────────────────────────────────────────────────
 
@@ -109,40 +109,7 @@ def save_json(path, data):
     Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2))
 
 
-# ─── PW API CALLS ─────────────────────────────────────────────────────────────
-
-def check_token():
-    log("Token check skipped — validated by API calls.")
-    return True
-
-
-def upload_image(image_path: str) -> str:
-    path = Path(image_path)
-    log(f"Uploading image: {path.name} ({path.stat().st_size // 1024} KB)")
-    with open(path, "rb") as f:
-        files = {"file": (path.name, f, "image/jpeg")}
-        r = requests.post(
-            f"{BASE_URL}/v1/files",
-            headers=HEADERS,
-            files=files,
-            timeout=30
-        )
-    log(f"Upload response: {r.status_code} {r.text[:300]}")
-    if r.status_code in (200, 201):
-        data     = r.json()
-        image_id = (
-            data.get("data", {}).get("_id")
-            or data.get("data", {}).get("imageId")
-            or data.get("_id")
-            or data.get("imageId")
-        )
-        if not image_id:
-            raise Exception(f"imageId not found in response: {data}")
-        log(f"✅ Image uploaded → imageId: {image_id}")
-        return image_id
-    else:
-        raise Exception(f"Upload failed: {r.status_code} {r.text[:300]}")
-
+# ─── PW: SEND TEXT MESSAGE ────────────────────────────────────────────────────
 
 def send_message(group, text):
     payload = {
@@ -165,6 +132,35 @@ def send_message(group, text):
     except Exception as e:
         log(f"  ❌ Message error → {group['name']}: {e}")
     time.sleep(1)
+
+
+# ─── PW: SEND IMAGE MESSAGE ───────────────────────────────────────────────────
+
+def upload_image(image_path: str) -> str:
+    path = Path(image_path)
+    log(f"Uploading image: {path.name} ({path.stat().st_size // 1024} KB)")
+    with open(path, "rb") as f:
+        files = {"file": (path.name, f, "image/jpeg")}
+        r = requests.post(
+            f"{BASE_URL}/v1/files",
+            headers=HEADERS,
+            files=files,
+            timeout=30
+        )
+    if r.status_code in (200, 201):
+        data     = r.json()
+        image_id = (
+            data.get("data", {}).get("_id")
+            or data.get("data", {}).get("imageId")
+            or data.get("_id")
+            or data.get("imageId")
+        )
+        if not image_id:
+            raise Exception(f"imageId not found in response: {data}")
+        log(f"✅ Image uploaded → imageId: {image_id}")
+        return image_id
+    else:
+        raise Exception(f"Upload failed: {r.status_code} {r.text[:300]}")
 
 
 def send_image_message(group, image_id, file_size_kb):
@@ -191,50 +187,89 @@ def send_image_message(group, image_id, file_size_kb):
     time.sleep(1)
 
 
+# ─── PW: SEND POLL (TWO-STEP) ─────────────────────────────────────────────────
+
 def send_poll(group, question):
     options = question["options"]
-    correct = question["correct"]
-    payload = {
-        "batchId":       BATCH_ID,
-        "groupId":       group["groupId"],
-        "role":          "Mentor",
-        "question":      question["question"],
-        "options":       [{"text": opt} for opt in options],
-        "correctOption": correct - 1,
-        "duration":      86400,
+    correct = question["correct"]   # 1-indexed: 1=A, 2=B, 3=C, 4=D
+
+    # ── STEP 1: Create poll → get pollId ──────────────────────
+    create_payload = {
+        "type":          "SINGLE",
+        "entityType":    "mentorship",
+        "entityId":      group["groupId"],
+        "poll_question": question["question"],
+        "correctOption": [correct],
+        "pollOptions": [
+            {"option_id": i + 1, "option_label": opt, "option_description": opt}
+            for i, opt in enumerate(options)
+        ],
     }
     try:
-        r = requests.post(
+        r1 = requests.post(
             f"{BASE_URL}/v2/poll/create-poll",
-            headers=JSON_HEADERS, json=payload, timeout=15
+            headers=JSON_HEADERS, json=create_payload, timeout=15
         )
-        if r.status_code in (200, 201):
-            log(f"  ✅ Poll → {group['name']}: {question['question'][:50]}...")
-        else:
-            log(f"  ⚠️  Poll failed → {group['name']}: {r.status_code} {r.text[:150]}")
+        if r1.status_code not in (200, 201):
+            log(f"  ⚠️  Poll create failed → {group['name']}: {r1.status_code} {r1.text[:200]}")
+            return
+        poll_data = r1.json().get("data", {})
+        poll_id   = poll_data.get("pollId")
+        if not poll_id:
+            log(f"  ⚠️  No pollId in response → {group['name']}: {r1.text[:150]}")
+            return
     except Exception as e:
-        log(f"  ❌ Poll error → {group['name']}: {e}")
+        log(f"  ❌ Poll create error → {group['name']}: {e}")
+        return
+
+    time.sleep(0.5)
+
+    # ── STEP 2: Post poll into group chat ─────────────────────
+    poll_options_str = json.dumps({
+        "pollId":        poll_id,
+        "type":          "SINGLE",
+        "pollOptions": [
+            {"option_id": i + 1, "option_label": opt, "option_description": opt}
+            for i, opt in enumerate(options)
+        ],
+        "correctOption": [correct],
+    })
+    chat_payload = {
+        "batchId":     BATCH_ID,
+        "groupId":     group["groupId"],
+        "role":        "Mentor",
+        "text":        question["question"],
+        "type":        "poll",
+        "pollOptions": poll_options_str,
+    }
+    try:
+        r2 = requests.post(
+            f"{BASE_URL}/v1/conversation/{group['conversationId']}/chat",
+            headers=JSON_HEADERS, json=chat_payload, timeout=15
+        )
+        if r2.status_code in (200, 201):
+            log(f"  ✅ Poll sent → {group['name']}: {question['question'][:55]}...")
+        else:
+            log(f"  ⚠️  Poll chat failed → {group['name']}: {r2.status_code} {r2.text[:200]}")
+    except Exception as e:
+        log(f"  ❌ Poll chat error → {group['name']}: {e}")
+
     time.sleep(1.5)
 
 
 # ─── GOOGLE DRIVE HELPERS ─────────────────────────────────────────────────────
 
 def get_drive_service():
-    """Build and return an authenticated Google Drive service."""
-    import json as _json
     from google.oauth2 import service_account
     from googleapiclient.discovery import build
-
-    sa_info = _json.loads(GDRIVE_SA_JSON)
+    sa_info = json.loads(GDRIVE_SA_JSON)
     creds   = service_account.Credentials.from_service_account_info(
-        sa_info,
-        scopes=["https://www.googleapis.com/auth/drive.readonly"]
+        sa_info, scopes=["https://www.googleapis.com/auth/drive.readonly"]
     )
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
 def list_drive_photos(service):
-    """List all image files in the college photos Drive folder."""
     results = service.files().list(
         q=f"'{GDRIVE_FOLDER_ID}' in parents and mimeType contains 'image/' and trashed=false",
         fields="files(id, name)",
@@ -244,10 +279,8 @@ def list_drive_photos(service):
 
 
 def download_drive_photo(service, file_id, dest_path):
-    """Download a Drive file to dest_path."""
     from googleapiclient.http import MediaIoBaseDownload
     import io
-
     request = service.files().get_media(fileId=file_id)
     fh      = io.FileIO(dest_path, "wb")
     dl      = MediaIoBaseDownload(fh, request)
@@ -255,10 +288,9 @@ def download_drive_photo(service, file_id, dest_path):
     while not done:
         _, done = dl.next_chunk()
     fh.close()
-    log(f"Downloaded → {dest_path}")
 
 
-# ─── GROQ HELPERS ─────────────────────────────────────────────────────────────
+# ─── GROQ CLIENT ──────────────────────────────────────────────────────────────
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 
@@ -267,12 +299,18 @@ def sample_pyq_text(subject, chars=3000):
     fname = PDF_DIR / f"{subject.lower()}_pyq.txt"
     if not fname.exists():
         return f"[No PYQ file for {subject} — use general JEE knowledge]"
-    text = fname.read_text(encoding="utf-8", errors="ignore")
+    text  = fname.read_text(encoding="utf-8", errors="ignore")
     if len(text) <= chars:
         return text
+    seed  = date.today().toordinal() * 100 + hash(subject) % 100
+    random.seed(seed)
     start = random.randint(0, len(text) - chars)
-    return text[start: start + chars]
+    chunk = text[start: start + chars]
+    nl    = chunk.find("\n")
+    return chunk[nl:].strip() if nl > 0 else chunk.strip()
 
+
+# ─── GROQ: GENERATE QUESTIONS ─────────────────────────────────────────────────
 
 def generate_questions(subjects):
     subject_list  = "\n".join(f"Q{i+1}: {s}" for i, s in enumerate(subjects))
@@ -289,24 +327,26 @@ PYQ MATERIAL:
 {context_block}
 
 RULES:
-- Each question MUST start with year/session tag e.g. [JEE Main 2022 June S1]
-- 4 options per question (A B C D)
+- Each question MUST include exam year and session tag e.g. [JEE Main 2022 June S1] or [JEE Adv 2019 P2]
+- 4 options per question (A B C D) — specific values, not placeholders
 - correct is 1-4 (1=A, 2=B, 3=C, 4=D)
-- solution: 3-5 step working
-- No LaTeX backslashes — plain text math only
-- Real JEE questions only
+- solution: 3-5 step working in plain text
+- CRITICAL: Do NOT use LaTeX backslashes like \\alpha \\frac \\theta \\sqrt
+- Write math in plain text: "alpha" not "\\alpha", "x^2" not "x squared"
+- Backslashes break JSON parsing — plain text only
 
-Return ONLY a JSON array:
+Return ONLY a JSON array of exactly 5 objects, no markdown, no backticks:
 [
   {{
     "subject": "Physics",
     "year_tag": "[JEE Main 2023 Jan S2]",
-    "question": "full question text",
+    "question": "[JEE Main 2023 Jan S2] full question text here",
     "options": ["A text", "B text", "C text", "D text"],
     "correct": 2,
-    "solution": "Step 1: ...\\nStep 2: ...\\nStep 3: ..."
+    "solution": "Step 1: ...\\nStep 2: ...\\nAnswer: B"
   }}
 ]"""
+
     resp = groq_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[{"role": "user", "content": prompt}],
@@ -315,17 +355,26 @@ Return ONLY a JSON array:
         response_format={"type": "json_object"},
     )
     raw = resp.choices[0].message.content.strip()
+
+    # Clean LaTeX backslashes that break JSON
+    import re
+    raw = re.sub(r'\\([a-zA-Z]+)', r' \1 ', raw)
+    raw = re.sub(r'\\(?!["\\/bfnrtu])', r' ', raw)
+
     try:
         parsed = json.loads(raw)
         if isinstance(parsed, list):
             return parsed
+        # Groq sometimes wraps array in an object
         for key in parsed:
             if isinstance(parsed[key], list):
                 return parsed[key]
     except Exception as e:
-        log(f"[WARN] Question JSON parse error: {e}")
+        log(f"[WARN] Question JSON parse error: {e}\nRaw: {raw[:300]}")
     return []
 
+
+# ─── GROQ: INTRO MESSAGE ──────────────────────────────────────────────────────
 
 def generate_intro_message(subjects):
     subject_str = ", ".join(subjects)
@@ -337,9 +386,9 @@ Today's date: {date.today().strftime('%A, %d %B %Y')}
 Rules:
 - 3-5 lines max
 - Mention today's subjects naturally
-- End with hype to answer polls
-- Sound like a real teacher/mentor
-- English only, fresh every day
+- End with hype to answer the polls
+- Sound like a real caring teacher/mentor
+- English only, fresh and different every day
 
 Return ONLY the message text."""
     resp = groq_client.chat.completions.create(
@@ -351,25 +400,21 @@ Return ONLY the message text."""
     return resp.choices[0].message.content.strip()
 
 
+# ─── GROQ: MOTIVATION QUOTE ───────────────────────────────────────────────────
+
 def generate_motivation_quote():
     system = """You write deeply authentic motivational quotes for JEE/IIT aspirants in ENGLISH ONLY.
 
 Raw, real — like something a topper or struggling student actually thinks at 2 AM.
 
 RULES:
-✅ English only
-✅ Specific to JEE: mock ranks, rank drops, 3 AM studying, Kota pressure, PCM, parents sacrifices
-✅ 1-4 lines max. Punchy.
-✅ Make the student FEEL seen, not lectured
-BANNED: "Never give up", "Believe in yourself", "Work hard", any generic cliche
+- English only
+- Specific to JEE: mock ranks, rank drops, 3 AM studying, Kota pressure, PCM, parents sacrifices
+- 1-4 lines max. Punchy.
+- Make the student FEEL seen, not lectured
+- BANNED: "Never give up", "Believe in yourself", "Work hard", any generic cliche
 
-GREAT EXAMPLES:
-- "Your rank dropped 3000. Your parents said nothing. That silence is the heaviest weight you'll carry into that exam room."
-- "The integration you couldn't solve at midnight — that's the one on JEE paper. Sit back down."
-- "Every topper in that rank list had a night they wanted to quit. You're in that night right now. Stay."
-- "The student who scores 99 percentile doesn't work harder than you. They waste less."
-
-Return ONLY JSON: {"quote": "quote text, use \\n for line breaks"}"""
+Return ONLY JSON: {"quote": "quote text"}"""
 
     categories = [
         "discipline_and_consistency", "exam_pressure_and_fear",
@@ -396,30 +441,21 @@ Return ONLY JSON: {"quote": "quote text, use \\n for line breaks"}"""
         return raw
 
 
+# ─── GROQ: COLLEGE CAPTION ────────────────────────────────────────────────────
+
 def generate_college_caption(photo_name):
-    """Groq writes a fresh IIT campus photo caption — different every time."""
-    prompt = f"""Write a short, punchy caption to send with an IIT campus photo to JEE aspirants.
+    prompt = f"""Write a short punchy caption to send with an IIT campus photo to JEE aspirants.
 
 Photo filename hint: {photo_name}
 Seed for variety: {date.today().toordinal()}
 
-RULES:
+Rules:
 - 1-3 lines max
-- Make the student WANT to be there — create desire and hunger
-- Casual, real tone — not corporate
-- Can be dreamy, can be challenging, can be darkly motivating
-- English only
-- No hashtags
-
-GREAT EXAMPLES:
-- "This could be your hostel room in 2 years. Or it won't be. Your choice starts today."
-- "Every student walking this campus once sat where you're sitting right now. 📚"
-- "The people who study here didn't get lucky. They just refused to stop."
-- "Imagine walking through this gate with your JEE rank. Now go earn it."
-- "This campus doesn't care about your excuses. Neither does the rank list."
+- Make the student WANT to be there
+- Casual, real tone
+- English only, no hashtags
 
 Return ONLY the caption text."""
-
     resp = groq_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[{"role": "user", "content": prompt}],
@@ -429,17 +465,19 @@ Return ONLY the caption text."""
     return resp.choices[0].message.content.strip()
 
 
+# ─── GROQ: DAILY CHECKIN ──────────────────────────────────────────────────────
+
 def generate_daily_checkin_message():
     today_name = date.today().strftime("%A")
-    prompt = f"""Write a warm, engaging message to send to JEE aspirants at 5 PM asking:
+    prompt = f"""Write a warm engaging message to JEE aspirants at 5 PM asking:
 1. How their day is going
-2. Whether they were able to cover their today's study target
+2. Whether they covered today's study target
 
 Today is {today_name}, {date.today().strftime('%d %B %Y')}.
-Seed for variety: {date.today().toordinal()}
+Seed: {date.today().toordinal()}
 
-RULES:
-- Sound like a caring mentor/teacher
+Rules:
+- Sound like a caring mentor
 - Casual and warm tone
 - 4-6 lines max
 - English only
@@ -455,20 +493,21 @@ Return ONLY the message text."""
     return resp.choices[0].message.content.strip()
 
 
+# ─── GROQ: WEEKLY REVIEW ──────────────────────────────────────────────────────
+
 def generate_weekly_review_message():
-    prompt = f"""Write an engaging message to send to JEE aspirants at 5 PM on Saturday asking them to:
+    prompt = f"""Write an engaging message to JEE aspirants at 5 PM on Saturday asking them to:
 1. Rate their week out of 10
 2. Share how their week went
 
 Week ending: {date.today().strftime('%d %B %Y')}
 Seed: {date.today().toordinal()}
 
-RULES:
-- Warm, reflective tone
+Rules:
+- Warm reflective tone
 - Make students feel safe to share honestly
 - 5-7 lines max
 - English only
-- End with encouragement for next week
 
 Return ONLY the message text."""
     resp = groq_client.chat.completions.create(
@@ -484,32 +523,20 @@ Return ONLY the message text."""
 
 def run_motivation():
     log("=== MODE: MOTIVATION (8 AM) ===")
-
     log("Generating quote via Groq...")
     quote = generate_motivation_quote()
     log(f"Quote: {quote[:80]}...")
 
-    log("Rendering motivation image...")
-    from generate_motivation import render
-    img_path = "todays_motivation.jpg"
-    img = render({"quote": quote, "style": "fierce"})
-    img.save(img_path, "JPEG", quality=96)
-    file_size_kb = Path(img_path).stat().st_size // 1024
-    log(f"Image saved → {img_path} ({file_size_kb} KB)")
-
-    log("Uploading image to PW...")
-    image_id = upload_image(img_path)
+    msg = f"🌅 Good Morning, Lakshya JEE 2027!\n\n{quote}\n\n— Keep going. Your IIT is waiting. 💪"
 
     for group in GROUPS:
         log(f"Sending to {group['name']}...")
-        send_message(group, "🌅 Today's Morning Motivation")
-        time.sleep(0.5)
-        send_image_message(group, image_id, file_size_kb)
+        send_message(group, msg)
 
     log("✅ Motivation mode complete.")
     send_alert(
-        "✅ Motivation Sent",
-        f"Morning motivation image sent to all 5 groups.\nDate: {date.today()}\nQuote: {quote[:100]}..."
+        "✅ Morning Motivation Sent",
+        f"Motivation sent to all 5 groups.\nDate: {date.today()}\nQuote: {quote}"
     )
 
 
@@ -538,10 +565,13 @@ def run_quiz():
     if len(questions) < 5:
         msg = f"Quiz failed — only {len(questions)}/5 questions after {attempts} attempts."
         log(f"❌ {msg}")
-        send_alert("❌ Lakshya Poll Automation FAILED", msg)
+        send_alert("❌ Lakshya Quiz FAILED", msg)
         sys.exit(1)
 
     log(f"✅ Got {len(questions)} questions.")
+    for i, q in enumerate(questions):
+        log(f"   Q{i+1} [{q.get('subject','')}]: {q['question'][:65]}...")
+
     intro = generate_intro_message(subjects)
     log(f"Intro: {intro[:80]}...")
 
@@ -552,10 +582,11 @@ def run_quiz():
         for i, q in enumerate(questions):
             log(f"  Poll {i+1}/5 [{q.get('subject','')}]")
             send_poll(group, q)
-            time.sleep(1)
 
+    # Save for solution mode
     save_json(TODAY_Q_FILE, questions)
 
+    # Update history
     for q in questions:
         qhash = str(hash(q["question"][:50]))
         if qhash not in history["used"]:
@@ -567,7 +598,8 @@ def run_quiz():
     log("✅ Quiz mode complete.")
     send_alert(
         "✅ Polls Sent",
-        f"5 polls sent to all 5 groups.\nSubjects: {subjects}\nDate: {date.today()}"
+        f"5 polls sent to all 5 groups.\nSubjects: {subjects}\nDate: {date.today()}\n\n"
+        + "\n".join(f"Q{i+1} [{q.get('subject','')}]: {q['question'][:80]}" for i, q in enumerate(questions))
     )
 
 
@@ -592,15 +624,15 @@ def run_solution():
 
     for group in GROUPS:
         log(f"\n── {group['name']} ──")
-        send_message(group, "🎯 Today's Poll Solutions — Check how you did!")
+        send_message(group, "🎯 Solutions to today's quiz are here! Check your answers 👇")
         time.sleep(1)
 
         for i, q in enumerate(questions):
             subject        = q.get("subject", "")
+            year_tag       = q.get("year_tag", "")
             opts           = q.get("options", [])
             correct        = q.get("correct", 1)
             soln           = q.get("solution", "No solution available.")
-            year_tag       = q.get("year_tag", "")
             correct_letter = letters[correct - 1] if 1 <= correct <= 4 else "?"
             correct_text   = opts[correct - 1] if opts else ""
 
@@ -615,31 +647,25 @@ def run_solution():
             time.sleep(1.5)
 
     log("✅ Solution mode complete.")
-    send_alert(
-        "✅ Solutions Sent",
-        f"5 solutions sent to all 5 groups.\nDate: {date.today()}"
-    )
+    send_alert("✅ Solutions Sent", f"5 solutions sent to all 5 groups.\nDate: {date.today()}")
 
 
 # ─── MODE: CHECKIN (5 PM daily) ───────────────────────────────────────────────
 
 def run_checkin():
     log("=== MODE: CHECKIN (5 PM) ===")
-
     is_saturday = date.today().weekday() == 5
 
     if is_saturday:
-        log("It's Saturday — generating weekly review message...")
+        log("Saturday — generating weekly review...")
         message       = generate_weekly_review_message()
         header        = "📊 Weekly Review Time!"
         email_subject = "✅ Weekly Review Sent"
-        email_body    = f"Saturday weekly review sent to all 5 groups.\nDate: {date.today()}"
     else:
-        log("Generating daily checkin message...")
+        log("Generating daily checkin...")
         message       = generate_daily_checkin_message()
         header        = "👋 Evening Check-In"
         email_subject = "✅ Daily Checkin Sent"
-        email_body    = f"5 PM checkin sent to all 5 groups.\nDate: {date.today()}"
 
     log(f"Message: {message[:80]}...")
 
@@ -650,7 +676,7 @@ def run_checkin():
         send_message(group, message)
 
     log("✅ Checkin mode complete.")
-    send_alert(email_subject, email_body)
+    send_alert(email_subject, f"Checkin sent to all 5 groups.\nDate: {date.today()}")
 
 
 # ─── MODE: COLLEGE (3 PM Mon-Wed-Fri) ────────────────────────────────────────
@@ -661,89 +687,63 @@ def run_college():
     if not GDRIVE_SA_JSON or not GDRIVE_FOLDER_ID:
         raise Exception("GDRIVE_SA_JSON or GDRIVE_FOLDER_ID secret is missing.")
 
-    # 1. Connect to Drive
     log("Connecting to Google Drive...")
-    service = get_drive_service()
-
-    # 2. List all photos in folder
+    service    = get_drive_service()
     all_photos = list_drive_photos(service)
     log(f"Found {len(all_photos)} photos in Drive folder.")
 
     if not all_photos:
-        send_alert(
-            "⚠️ College Photo — No photos in Drive",
-            "The college_photos Drive folder is empty. Please add photos."
-        )
+        send_alert("⚠️ College Photo — No photos in Drive", "Add photos to the Drive folder.")
         sys.exit(1)
 
-    # 3. Load sent history
-    sent_data  = load_json(SENT_PHOTOS_FILE, {"sent": []})
-    sent_ids   = set(sent_data.get("sent", []))
-
-    # 4. Find unsent photos
-    all_ids    = {p["id"] for p in all_photos}
-    unsent     = [p for p in all_photos if p["id"] not in sent_ids]
+    sent_data = load_json(SENT_PHOTOS_FILE, {"sent": []})
+    sent_ids  = set(sent_data.get("sent", []))
+    all_ids   = {p["id"] for p in all_photos}
+    unsent    = [p for p in all_photos if p["id"] not in sent_ids]
     log(f"Unsent photos: {len(unsent)} / {len(all_photos)}")
 
-    # 5. If all sent → alert and reset cycle
     if not unsent:
+        log("All photos sent — resetting cycle.")
         send_alert(
-            "📸 College Photos — All photos sent! Cycle complete.",
-            f"All {len(all_photos)} photos have been sent.\n\n"
-            f"Add new photos to the Drive folder to continue, "
-            f"or the cycle will restart from the beginning next run.\n\n"
-            f"Restarting cycle now..."
+            "📸 College Photos — Cycle complete, restarting",
+            f"All {len(all_photos)} photos have been sent. Starting cycle again."
         )
-        log("All photos sent — resetting cycle and picking from all photos.")
         sent_data["sent"] = []
         sent_ids  = set()
         unsent    = all_photos
 
-    # 6. Pick a random unsent photo
     photo = random.choice(unsent)
-    log(f"Selected photo: {photo['name']} (id: {photo['id']})")
+    log(f"Selected: {photo['name']}")
 
-    # 7. Download it
     ext      = Path(photo["name"]).suffix or ".jpg"
     tmp_path = f"college_photo{ext}"
     download_drive_photo(service, photo["id"], tmp_path)
     file_size_kb = Path(tmp_path).stat().st_size // 1024
     log(f"Downloaded: {tmp_path} ({file_size_kb} KB)")
 
-    # 8. Generate caption
     log("Generating caption via Groq...")
     caption = generate_college_caption(photo["name"])
     log(f"Caption: {caption}")
 
-    # 9. Upload to PW
     log("Uploading to PW...")
     image_id = upload_image(tmp_path)
 
-    # 10. Send to all groups
     for group in GROUPS:
         log(f"Sending to {group['name']}...")
         send_image_message(group, image_id, file_size_kb)
         time.sleep(0.5)
         send_message(group, caption)
 
-    # 11. Mark as sent
     sent_data["sent"].append(photo["id"])
-    # Remove IDs that no longer exist in Drive (deleted photos)
     sent_data["sent"] = [i for i in sent_data["sent"] if i in all_ids]
     save_json(SENT_PHOTOS_FILE, sent_data)
-    log(f"Marked as sent. Total sent: {len(sent_data['sent'])}/{len(all_photos)}")
+    log(f"Marked as sent. Remaining: {len(all_photos) - len(sent_data['sent'])}/{len(all_photos)}")
 
-    # Cleanup
     Path(tmp_path).unlink(missing_ok=True)
-
     log("✅ College photo mode complete.")
     send_alert(
         "✅ College Photo Sent",
-        f"Photo: {photo['name']}\n"
-        f"Caption: {caption}\n"
-        f"Sent to all 5 groups.\n"
-        f"Photos remaining: {len(all_photos) - len(sent_data['sent'])}/{len(all_photos)}\n"
-        f"Date: {date.today()}"
+        f"Photo: {photo['name']}\nCaption: {caption}\nDate: {date.today()}"
     )
 
 
@@ -758,7 +758,6 @@ def main():
     )
     args = parser.parse_args()
     log(f"Starting in mode: {args.mode.upper()}")
-    check_token()
 
     try:
         if args.mode == "motivation":
