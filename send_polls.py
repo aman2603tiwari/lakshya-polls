@@ -14,7 +14,7 @@ GitHub Secrets required:
   GDRIVE_FOLDER_ID  — ID of the Drive folder containing college photos
 """
 
-import os, sys, json, random, time, argparse, smtplib, traceback
+import os, sys, json, random, time, argparse, smtplib, traceback, re
 from datetime import date, datetime
 from pathlib import Path
 from email.mime.text import MIMEText
@@ -109,9 +109,106 @@ def save_json(path, data):
     Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2))
 
 
+# ─── GROQ JSON PARSING ────────────────────────────────────────────────────────
+
+def clean_latex(text: str) -> str:
+    text = re.sub(r'\\([a-zA-Z]+)', r' \1 ', text)
+    text = re.sub(r'\\(?!["\\/bfnrtu])', r' ', text)
+    return text
+
+
+def extract_questions_from_groq(raw: str) -> list:
+    """
+    Robustly extract and VALIDATE a list of question dicts from Groq response.
+    Only returns questions that have all required fields with valid values.
+    """
+    # Strip markdown fences
+    if "```" in raw:
+        parts = raw.split("```")
+        for part in parts:
+            stripped = part.strip()
+            if stripped.startswith("json"):
+                stripped = stripped[4:].strip()
+            if stripped.startswith("[") or stripped.startswith("{"):
+                raw = stripped
+                break
+
+    raw = clean_latex(raw).strip()
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        log(f"[WARN] JSON parse failed: {e} — Raw: {raw[:200]}")
+        return []
+
+    # Unwrap if Groq returned object instead of array
+    if isinstance(parsed, dict):
+        questions = []
+        for val in parsed.values():
+            if isinstance(val, list) and len(val) > 0 and isinstance(val[0], dict):
+                if "question" in val[0] or "question_text" in val[0]:
+                    questions = val
+                    break
+        if not questions:
+            for val in parsed.values():
+                if isinstance(val, list):
+                    questions = val
+                    break
+    elif isinstance(parsed, list):
+        questions = parsed
+    else:
+        return []
+
+    # Validate each question — only keep fully valid ones
+    valid = []
+    for q in questions:
+        if not isinstance(q, dict):
+            continue
+
+        # Fix alternate key names
+        if "question_text" in q and "question" not in q:
+            q["question"] = q.pop("question_text")
+        if "answer_options" in q and "options" not in q:
+            q["options"] = q.pop("answer_options")
+        if "answer" in q and "correct" not in q:
+            q["correct"] = q.pop("answer")
+
+        # Validate question text
+        if not q.get("question") or not str(q["question"]).strip():
+            log(f"[WARN] Rejected: missing question text")
+            continue
+
+        # Validate options
+        opts = q.get("options")
+        if not isinstance(opts, list) or len(opts) < 4:
+            log(f"[WARN] Rejected: bad options → {str(q.get('question',''))[:50]}")
+            continue
+        # Check options are not empty placeholders
+        if any(not str(o).strip() for o in opts[:4]):
+            log(f"[WARN] Rejected: empty option → {str(q.get('question',''))[:50]}")
+            continue
+
+        # Validate correct
+        correct = q.get("correct")
+        if not isinstance(correct, int) or not (1 <= correct <= 4):
+            log(f"[WARN] Rejected: bad correct={correct} → {str(q.get('question',''))[:50]}")
+            continue
+
+        # Validate solution
+        if not q.get("solution") or not str(q["solution"]).strip():
+            q["solution"] = "Refer to standard JEE solution."
+
+        q["options"] = [str(o) for o in opts[:4]]
+        valid.append(q)
+
+    return valid
+
+
 # ─── PW: SEND TEXT MESSAGE ────────────────────────────────────────────────────
 
 def send_message(group, text):
+    if not text or not text.strip():
+        return
     payload = {
         "batchId":   BATCH_ID,
         "groupId":   group["groupId"],
@@ -134,7 +231,7 @@ def send_message(group, text):
     time.sleep(1)
 
 
-# ─── PW: SEND IMAGE MESSAGE ───────────────────────────────────────────────────
+# ─── PW: UPLOAD + SEND IMAGE ──────────────────────────────────────────────────
 
 def upload_image(image_path: str) -> str:
     path = Path(image_path)
@@ -143,9 +240,7 @@ def upload_image(image_path: str) -> str:
         files = {"file": (path.name, f, "image/jpeg")}
         r = requests.post(
             f"{BASE_URL}/v1/files",
-            headers=HEADERS,
-            files=files,
-            timeout=30
+            headers=HEADERS, files=files, timeout=30
         )
     if r.status_code in (200, 201):
         data     = r.json()
@@ -159,8 +254,7 @@ def upload_image(image_path: str) -> str:
             raise Exception(f"imageId not found in response: {data}")
         log(f"✅ Image uploaded → imageId: {image_id}")
         return image_id
-    else:
-        raise Exception(f"Upload failed: {r.status_code} {r.text[:300]}")
+    raise Exception(f"Upload failed: {r.status_code} {r.text[:300]}")
 
 
 def send_image_message(group, image_id, file_size_kb):
@@ -190,8 +284,16 @@ def send_image_message(group, image_id, file_size_kb):
 # ─── PW: SEND POLL (TWO-STEP) ─────────────────────────────────────────────────
 
 def send_poll(group, question):
-    options = question["options"]
-    correct = question["correct"]   # 1-indexed: 1=A, 2=B, 3=C, 4=D
+    options = question.get("options", [])
+    correct = question.get("correct")
+
+    # Safety check
+    if not options or len(options) < 4 or not correct or not (1 <= correct <= 4):
+        log(f"  ⚠️  Skipping malformed poll: {str(question.get('question',''))[:50]}")
+        return
+    if not question.get("question", "").strip():
+        log(f"  ⚠️  Skipping poll with empty question text")
+        return
 
     # ── STEP 1: Create poll → get pollId ──────────────────────
     create_payload = {
@@ -332,7 +434,7 @@ RULES:
 - correct is 1-4 (1=A, 2=B, 3=C, 4=D)
 - solution: 3-5 step working in plain text
 - CRITICAL: Do NOT use LaTeX backslashes like \\alpha \\frac \\theta \\sqrt
-- DO NOT USE QUESTIONS WHERE IMAGES ARE REFFERED OR PRESENT 
+- DO NOT USE QUESTIONS WHERE IMAGES ARE REFERRED OR PRESENT
 - Write math in plain text: "alpha" not "\\alpha", "x^2" not "x squared"
 - Backslashes break JSON parsing — plain text only
 
@@ -348,39 +450,20 @@ Return ONLY a JSON array of exactly 5 objects, no markdown, no backticks:
   }}
 ]"""
 
-    resp = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.3,
-        max_tokens=3000,
-        response_format={"type": "json_object"},
-    )
-    raw = resp.choices[0].message.content.strip()
-
-    # Clean LaTeX backslashes that break JSON
-    import re
-    raw = re.sub(r'\\([a-zA-Z]+)', r' \1 ', raw)
-    raw = re.sub(r'\\(?!["\\/bfnrtu])', r' ', raw)
-
     try:
-        parsed = json.loads(raw)
-        # If it's already a list
-        if isinstance(parsed, list):
-            return parsed
-        # Groq wraps in object — find the list value
-        for key in parsed:
-            val = parsed[key]
-            if isinstance(val, list) and len(val) > 0:
-                # Make sure items have 'question' key
-                if isinstance(val[0], dict) and "question" in val[0]:
-                    return val
-        # Last resort — if there's only one key and it's a list
-        vals = [v for v in parsed.values() if isinstance(v, list)]
-        if vals:
-            return vals[0]
+        resp = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=3000,
+            response_format={"type": "json_object"},
+        )
+        raw = resp.choices[0].message.content.strip()
+        log(f"[DEBUG] Groq raw (first 150): {raw[:150]}")
+        return extract_questions_from_groq(raw)
     except Exception as e:
-        log(f"[WARN] Question JSON parse error: {e}\nRaw: {raw[:300]}")
-    return []
+        log(f"[WARN] Groq call failed: {e}")
+        return []
 
 
 # ─── GROQ: INTRO MESSAGE ──────────────────────────────────────────────────────
@@ -398,7 +481,7 @@ Rules:
 - End with hype to answer the polls
 - Sound like a real caring teacher/mentor
 - Use Hinglish or English, fresh and different every day
-- Don't use any quotes "" or''
+- Don't use any quotes "" or ''
 
 Return ONLY the message text."""
     resp = groq_client.chat.completions.create(
@@ -478,19 +561,18 @@ Return ONLY the caption text."""
 # ─── GROQ: DAILY CHECKIN ──────────────────────────────────────────────────────
 
 def generate_daily_checkin_message():
-    today_name = date.today().strftime("%A")
     prompt = f"""Write a warm engaging message to JEE aspirants at 5 PM asking:
 1. How their day is going
 2. Whether they covered today's study target
 
-Today is {today_name}, {date.today().strftime('%d %B %Y')}.
+Today is {date.today().strftime('%A, %d %B %Y')}.
 Seed: {date.today().toordinal()}
 
 Rules:
 - Sound like a caring mentor
 - Casual and warm tone
 - 1-2 lines max
-- Use English Or Hinglish
+- Use English or Hinglish
 - End with invitation to reply
 
 Return ONLY the message text."""
@@ -517,7 +599,7 @@ Rules:
 - Warm reflective tone
 - Make students feel safe to share honestly
 - 2-3 lines max
-- Use HInglish or English
+- Use Hinglish or English
 
 Return ONLY the message text."""
     resp = groq_client.chat.completions.create(
@@ -563,20 +645,35 @@ def run_quiz():
     log("Generating questions via Groq...")
     questions = []
     attempts  = 0
-    while len(questions) < 5 and attempts < 3:
+
+    while len(questions) < 5 and attempts < 5:
         attempts += 1
+        needed = 5 - len(questions)
+        log(f"Attempt {attempts}: need {needed} more question(s)...")
+
         qs = generate_questions(subjects)
-        if qs and len(qs) >= 5:
-            questions = qs[:5]
-            break
-        log(f"[WARN] Attempt {attempts}: got {len(qs)} questions, retrying...")
-        time.sleep(2)
+
+        # Add only valid questions not already collected
+        existing_texts = {q["question"] for q in questions}
+        for q in qs:
+            if len(questions) >= 5:
+                break
+            if q["question"] not in existing_texts:
+                questions.append(q)
+                existing_texts.add(q["question"])
+
+        log(f"  Got {len(qs)} valid this attempt — total so far: {len(questions)}/5")
+
+        if len(questions) < 5:
+            time.sleep(2)
 
     if len(questions) < 5:
-        msg = f"Quiz failed — only {len(questions)}/5 questions after {attempts} attempts."
+        msg = f"Quiz failed — only {len(questions)}/5 valid questions after {attempts} attempts."
         log(f"❌ {msg}")
         send_alert("❌ Lakshya Quiz FAILED", msg)
         sys.exit(1)
+
+    questions = questions[:5]
 
     log(f"✅ Got {len(questions)} questions.")
     for i, q in enumerate(questions):
@@ -598,7 +695,7 @@ def run_quiz():
 
     # Update history
     for q in questions:
-        qhash = str(hash(q["question"][:50]))
+        qhash = str(hash(q.get("question", "")[:50]))
         if qhash not in history["used"]:
             history["used"].append(qhash)
     history["used"] = history["used"][-500:]
@@ -609,7 +706,10 @@ def run_quiz():
     send_alert(
         "✅ Polls Sent",
         f"5 polls sent to all 5 groups.\nSubjects: {subjects}\nDate: {date.today()}\n\n"
-        + "\n".join(f"Q{i+1} [{q.get('subject','')}]: {q['question'][:80]}" for i, q in enumerate(questions))
+        + "\n".join(
+            f"Q{i+1} [{q.get('subject','')}]: {q.get('question','')[:80]}"
+            for i, q in enumerate(questions)
+        )
     )
 
 
@@ -649,7 +749,7 @@ def run_solution():
             sol_msg = (
                 f"Q{i+1} Solution [{subject}] {year_tag}\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"{q['question']}\n\n"
+                f"{q.get('question','')}\n\n"
                 f"✅ Correct Answer: ({correct_letter}) {correct_text}\n\n"
                 f"📝 Explanation:\n{soln}"
             )
@@ -681,8 +781,9 @@ def run_checkin():
 
     for group in GROUPS:
         log(f"Sending to {group['name']}...")
-        send_message(group, header)
-        time.sleep(0.5)
+        if header:
+            send_message(group, header)
+            time.sleep(0.5)
         send_message(group, message)
 
     log("✅ Checkin mode complete.")
@@ -716,11 +817,10 @@ def run_college():
         log("All photos sent — resetting cycle.")
         send_alert(
             "📸 College Photos — Cycle complete, restarting",
-            f"All {len(all_photos)} photos have been sent. Starting cycle again."
+            f"All {len(all_photos)} photos sent. Starting cycle again."
         )
         sent_data["sent"] = []
-        sent_ids  = set()
-        unsent    = all_photos
+        unsent = all_photos
 
     photo = random.choice(unsent)
     log(f"Selected: {photo['name']}")
@@ -747,7 +847,7 @@ def run_college():
     sent_data["sent"].append(photo["id"])
     sent_data["sent"] = [i for i in sent_data["sent"] if i in all_ids]
     save_json(SENT_PHOTOS_FILE, sent_data)
-    log(f"Marked as sent. Remaining: {len(all_photos) - len(sent_data['sent'])}/{len(all_photos)}")
+    log(f"Marked sent. Remaining: {len(all_photos) - len(sent_data['sent'])}/{len(all_photos)}")
 
     Path(tmp_path).unlink(missing_ok=True)
     log("✅ College photo mode complete.")
