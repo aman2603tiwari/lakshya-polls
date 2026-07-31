@@ -38,8 +38,6 @@ jobs:
       - name: Install dependencies
         run: pip install groq requests pillow google-api-python-client google-auth
 
-      # Detect mode from the SCHEDULE EXPRESSION — not the clock.
-      # Reliable even when GitHub Actions runs late.
       - name: Detect run mode
         id: detect_mode
         run: |
@@ -49,7 +47,6 @@ jobs:
           else
             SCHEDULE="${{ github.event.schedule }}"
             echo "Triggered by schedule: $SCHEDULE"
-
             case "$SCHEDULE" in
               "30 2 * * *")
                 echo "MODE=motivation" >> $GITHUB_ENV
@@ -73,7 +70,7 @@ jobs:
                 ;;
               *)
                 echo "MODE=motivation" >> $GITHUB_ENV
-                echo "Unknown schedule '$SCHEDULE' — defaulting to motivation"
+                echo "Unknown schedule — defaulting to motivation"
                 ;;
             esac
           fi
@@ -90,8 +87,11 @@ jobs:
           echo "Running in mode: $MODE"
           python send_polls.py --mode=$MODE
 
+      # ── Commit state files back to repo ──────────────────────────────────────
+      # Runs on quiz/college mode even if the script failed (if: always())
+      # This ensures todays_questions.json is always saved for solution mode
       - name: Commit updated state files
-        if: env.MODE == 'quiz' || env.MODE == 'college'
+        if: always() && (env.MODE == 'quiz' || env.MODE == 'college')
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
