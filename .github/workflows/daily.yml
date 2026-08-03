@@ -25,6 +25,8 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
@@ -39,41 +41,21 @@ jobs:
         run: pip install groq requests pillow google-api-python-client google-auth
 
       - name: Detect run mode
-        id: detect_mode
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "MODE=${{ github.event.inputs.mode }}" >> $GITHUB_ENV
-            echo "Manually triggered: ${{ github.event.inputs.mode }}"
           else
             SCHEDULE="${{ github.event.schedule }}"
-            echo "Triggered by schedule: $SCHEDULE"
             case "$SCHEDULE" in
-              "30 2 * * *")
-                echo "MODE=motivation" >> $GITHUB_ENV
-                echo "Detected: motivation (8 AM IST)"
-                ;;
-              "30 7 * * 1-5")
-                echo "MODE=quiz" >> $GITHUB_ENV
-                echo "Detected: quiz (1 PM IST)"
-                ;;
-              "30 9 * * 1,3,5")
-                echo "MODE=college" >> $GITHUB_ENV
-                echo "Detected: college photo (3 PM IST)"
-                ;;
-              "30 11 * * *")
-                echo "MODE=checkin" >> $GITHUB_ENV
-                echo "Detected: checkin (5 PM IST)"
-                ;;
-              "30 16 * * 1-5")
-                echo "MODE=solution" >> $GITHUB_ENV
-                echo "Detected: solution (10 PM IST)"
-                ;;
-              *)
-                echo "MODE=motivation" >> $GITHUB_ENV
-                echo "Unknown schedule — defaulting to motivation"
-                ;;
+              "30 2 * * *")   echo "MODE=motivation" >> $GITHUB_ENV ;;
+              "30 7 * * 1-5") echo "MODE=quiz"       >> $GITHUB_ENV ;;
+              "30 9 * * 1,3,5") echo "MODE=college"  >> $GITHUB_ENV ;;
+              "30 11 * * *")  echo "MODE=checkin"    >> $GITHUB_ENV ;;
+              "30 16 * * 1-5") echo "MODE=solution"  >> $GITHUB_ENV ;;
+              *)               echo "MODE=motivation" >> $GITHUB_ENV ;;
             esac
           fi
+          cat $GITHUB_ENV
 
       - name: Run automation
         env:
@@ -85,22 +67,29 @@ jobs:
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
         run: |
           echo "Running in mode: $MODE"
-          python send_polls.py --mode=$MODE
+          python send_polls.py --mode=$MODE || true
 
-      # ── Commit state files back to repo ──────────────────────────────────────
-      # Runs on quiz/college mode even if the script failed (if: always())
-      # This ensures todays_questions.json is always saved for solution mode
-      - name: Commit updated state files
+      - name: Save state files to repo
         if: always() && (env.MODE == 'quiz' || env.MODE == 'college')
         run: |
+          echo "=== Files in workspace ==="
+          ls -la *.json 2>/dev/null || echo "No .json files found"
+
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add todays_questions.json history.json sent_photos.json 2>/dev/null || true
+
+          # Force-add even if gitignored
+          git add -f todays_questions.json history.json sent_photos.json 2>/dev/null || true
+
+          echo "=== Staged files ==="
+          git diff --staged --name-only
+
           if git diff --staged --quiet; then
-            echo "No state changes to commit."
+            echo "Nothing to commit — files unchanged or missing"
           else
-            git commit -m "chore: update state files [$(date -u '+%Y-%m-%d %H:%M UTC')]"
+            git commit -m "chore: state files [$(date -u '+%Y-%m-%d %H:%M UTC')]"
             git push
+            echo "✅ Pushed state files to repo"
           fi
 
       - name: Upload motivation image as artifact
