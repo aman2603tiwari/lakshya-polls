@@ -498,14 +498,16 @@ Return ONLY the message text."""
 def generate_motivation_quote():
     system = """You write deeply authentic motivational quotes for JEE/IIT aspirants in ENGLISH ONLY.
 
-Raw, real — like something a topper or struggling student actually thinks at 2 AM.
+Raw, real — like something a topper or struggling student actually thinks while studying late.
 
 RULES:
 - English only
-- Specific to JEE: mock ranks, rank drops, 3 AM studying, Kota pressure, PCM, parents sacrifices
+- Specific to JEE: mock ranks, rank drops, late night studying, Kota pressure, PCM, parents sacrifices
 - 1-4 lines max. Punchy.
 - Make the student FEEL seen, not lectured
 - BANNED: "Never give up", "Believe in yourself", "Work hard", any generic cliche
+- AVOID these words entirely: doubt, quit, fail, die, kill, blood, 3 AM, midnight, alone, hopeless
+- Keep it intense but clean — PW has a content filter
 
 Return ONLY JSON: {"quote": "quote text"}"""
 
@@ -615,21 +617,91 @@ Return ONLY the message text."""
 
 def run_motivation():
     log("=== MODE: MOTIVATION (8 AM) ===")
-    log("Generating quote via Groq...")
-    quote = generate_motivation_quote()
-    log(f"Quote: {quote[:80]}...")
 
+    # Try generating a quote, with fallback if PW blocks it
+    quote = None
+    for attempt in range(3):
+        try:
+            q = generate_motivation_quote()
+            # Pre-screen: avoid words PW commonly blocks
+            blocked_words = ["3 AM", "3AM", "doubt", "quit", "fail", "die", "kill", "blood"]
+            if any(w.lower() in q.lower() for w in blocked_words):
+                log(f"[WARN] Quote contains potentially blocked word, retrying... (attempt {attempt+1})")
+                time.sleep(1)
+                continue
+            quote = q
+            break
+        except Exception as e:
+            log(f"[WARN] Quote generation failed attempt {attempt+1}: {e}")
+            time.sleep(1)
+
+    if not quote:
+        quote = "Today is another chance to get closer to your IIT dream. Stay focused, stay consistent. You've got this! 💪"
+        log("[WARN] Using fallback quote")
+
+    log(f"Quote: {quote[:80]}...")
     msg = f"🌅 Good Morning, Lakshya JEE 2027!\n\n{quote}\n\n— Keep going. Your IIT is waiting. 💪"
 
+    success = 0
+    fail    = 0
     for group in GROUPS:
         log(f"Sending to {group['name']}...")
-        send_message(group, msg)
+        payload = {
+            "batchId":   BATCH_ID,
+            "groupId":   group["groupId"],
+            "role":      "Mentor",
+            "type":      "text",
+            "text":      msg,
+            "filePages": 0,
+        }
+        try:
+            r = requests.post(
+                f"{BASE_URL}/v1/conversation/{group['conversationId']}/chat",
+                headers=JSON_HEADERS, json=payload, timeout=15
+            )
+            if r.status_code in (200, 201):
+                log(f"  ✅ Message → {group['name']}")
+                success += 1
+            elif r.status_code == 400 and "prohibited word" in r.text.lower():
+                log(f"  ⚠️  PW blocked quote for {group['name']} — trying fallback message")
+                # Send a safe fallback
+                fallback = "🌅 Good Morning, Lakshya JEE 2027!\n\nStart strong today. Every problem you solve today is one less obstacle between you and your IIT rank. 💪"
+                r2 = requests.post(
+                    f"{BASE_URL}/v1/conversation/{group['conversationId']}/chat",
+                    headers=JSON_HEADERS,
+                    json={**payload, "text": fallback},
+                    timeout=15
+                )
+                if r2.status_code in (200, 201):
+                    log(f"  ✅ Fallback sent → {group['name']}")
+                    success += 1
+                else:
+                    log(f"  ❌ Fallback also failed → {group['name']}: {r2.status_code}")
+                    fail += 1
+            else:
+                log(f"  ⚠️  Message failed → {group['name']}: {r.status_code} {r.text[:150]}")
+                fail += 1
+        except Exception as e:
+            log(f"  ❌ Message error → {group['name']}: {e}")
+            fail += 1
+        time.sleep(1)
 
-    log("✅ Motivation mode complete.")
-    send_alert(
-        "✅ Morning Motivation Sent",
-        f"Motivation sent to all 5 groups.\nDate: {date.today()}\nQuote: {quote}"
-    )
+    if fail > 0 and success == 0:
+        msg_alert = f"Motivation FAILED — all {fail} groups blocked or errored.\nQuote tried: {quote}"
+        log(f"❌ {msg_alert}")
+        send_alert("❌ Morning Motivation FAILED", msg_alert)
+        sys.exit(1)
+    elif fail > 0:
+        send_alert(
+            f"⚠️ Morning Motivation — {fail} groups failed",
+            f"Sent: {success}/5\nFailed: {fail}/5\nDate: {date.today()}\nQuote: {quote}"
+        )
+    else:
+        log("✅ Motivation mode complete.")
+        send_alert(
+            "✅ Morning Motivation Sent",
+            f"Sent to all 5 groups.\nDate: {date.today()}\nQuote: {quote}"
+        )
 
 
 # ─── MODE: QUIZ (1 PM Mon-Fri) ───────────────────────────────────────────────
