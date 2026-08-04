@@ -206,9 +206,10 @@ def extract_questions_from_groq(raw: str) -> list:
 
 # ─── PW: SEND TEXT MESSAGE ────────────────────────────────────────────────────
 
-def send_message(group, text):
+def send_message(group, text) -> bool:
+    """Returns True if message sent successfully, False otherwise."""
     if not text or not text.strip():
-        return
+        return False
     payload = {
         "batchId":   BATCH_ID,
         "groupId":   group["groupId"],
@@ -224,11 +225,20 @@ def send_message(group, text):
         )
         if r.status_code in (200, 201):
             log(f"  ✅ Message → {group['name']}")
+            time.sleep(1)
+            return True
+        elif r.status_code == 401:
+            log(f"  ❌ Token expired → {group['name']} — update PW_TOKEN in GitHub Secrets!")
+            time.sleep(1)
+            return False
         else:
             log(f"  ⚠️  Message failed → {group['name']}: {r.status_code} {r.text[:150]}")
+            time.sleep(1)
+            return False
     except Exception as e:
         log(f"  ❌ Message error → {group['name']}: {e}")
-    time.sleep(1)
+        time.sleep(1)
+        return False
 
 
 # ─── PW: UPLOAD + SEND IMAGE ──────────────────────────────────────────────────
@@ -644,54 +654,38 @@ def run_motivation():
 
     success = 0
     fail    = 0
+    token_expired = False
+
     for group in GROUPS:
         log(f"Sending to {group['name']}...")
-        payload = {
-            "batchId":   BATCH_ID,
-            "groupId":   group["groupId"],
-            "role":      "Mentor",
-            "type":      "text",
-            "text":      msg,
-            "filePages": 0,
-        }
-        try:
-            r = requests.post(
-                f"{BASE_URL}/v1/conversation/{group['conversationId']}/chat",
-                headers=JSON_HEADERS, json=payload, timeout=15
-            )
-            if r.status_code in (200, 201):
-                log(f"  ✅ Message → {group['name']}")
-                success += 1
-            elif r.status_code == 400 and "prohibited word" in r.text.lower():
-                log(f"  ⚠️  PW blocked quote for {group['name']} — trying fallback message")
-                # Send a safe fallback
-                fallback = "🌅 Good Morning, Lakshya JEE 2027!\n\nStart strong today. Every problem you solve today is one less obstacle between you and your IIT rank. 💪"
-                r2 = requests.post(
-                    f"{BASE_URL}/v1/conversation/{group['conversationId']}/chat",
-                    headers=JSON_HEADERS,
-                    json={**payload, "text": fallback},
-                    timeout=15
-                )
-                if r2.status_code in (200, 201):
-                    log(f"  ✅ Fallback sent → {group['name']}")
-                    success += 1
-                else:
-                    log(f"  ❌ Fallback also failed → {group['name']}: {r2.status_code}")
-                    fail += 1
-            else:
-                log(f"  ⚠️  Message failed → {group['name']}: {r.status_code} {r.text[:150]}")
-                fail += 1
-        except Exception as e:
-            log(f"  ❌ Message error → {group['name']}: {e}")
+        ok = send_message(group, msg)
+        if ok:
+            success += 1
+        else:
+            # Check if it's a token issue
             fail += 1
-        time.sleep(1)
+            # Try fallback if prohibited word
+            fallback = "🌅 Good Morning, Lakshya JEE 2027!\n\nStart strong today. Every problem you solve is one step closer to your IIT rank. Keep going! 💪"
+            ok2 = send_message(group, fallback)
+            if ok2:
+                success += 1
+                fail -= 1
 
-    if fail > 0 and success == 0:
-        msg_alert = f"Motivation FAILED — all {fail} groups blocked or errored.\nQuote tried: {quote}"
+    log(f"Motivation results: {success}/5 sent, {fail}/5 failed")
+
+    if success == 0:
+        msg_alert = (
+            f"❌ Morning Motivation FAILED — 0/5 groups received the message.\n"
+            f"Most likely cause: PW_TOKEN expired.\n\n"
+            f"Fix: pw.live → group → create poll → copy Authorization header → "
+            f"GitHub Secrets → PW_TOKEN → Update\n\n"
+            f"Quote attempted: {quote}"
+        )
         log(f"❌ {msg_alert}")
-        send_alert("❌ Morning Motivation FAILED", msg_alert)
+        send_alert("❌ Morning Motivation FAILED — Token likely expired", msg_alert)
         sys.exit(1)
     elif fail > 0:
+        log("⚠️  Motivation sent to some groups.")
         send_alert(
             f"⚠️ Morning Motivation — {fail} groups failed",
             f"Sent: {success}/5\nFailed: {fail}/5\nDate: {date.today()}\nQuote: {quote}"
