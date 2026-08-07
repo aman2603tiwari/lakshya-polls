@@ -57,6 +57,12 @@ jobs:
           fi
           cat $GITHUB_ENV
 
+      - name: Clear stale state files (quiz mode only)
+        if: env.MODE == 'quiz'
+        run: |
+          rm -f todays_questions.json
+          echo "Cleared todays_questions.json"
+
       - name: Run automation
         env:
           PW_TOKEN:         ${{ secrets.PW_TOKEN }}
@@ -72,24 +78,31 @@ jobs:
       - name: Save state files to repo
         if: always() && (env.MODE == 'quiz' || env.MODE == 'college')
         run: |
-          echo "=== Files in workspace ==="
-          ls -la *.json 2>/dev/null || echo "No .json files found"
+          echo "=== Current directory ==="
+          pwd
+          echo "=== All json files anywhere ==="
+          find . -name "*.json" 2>/dev/null
+          echo "=== Git root ==="
+          git rev-parse --show-toplevel
 
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Force-add even if gitignored
+          # Add from git root explicitly
+          GIT_ROOT=$(git rev-parse --show-toplevel)
+          cd "$GIT_ROOT"
+
           git add -f todays_questions.json history.json sent_photos.json 2>/dev/null || true
 
           echo "=== Staged files ==="
           git diff --staged --name-only
 
           if git diff --staged --quiet; then
-            echo "Nothing to commit — files unchanged or missing"
+            echo "Nothing to commit"
           else
             git commit -m "chore: state files [$(date -u '+%Y-%m-%d %H:%M UTC')]"
             git push
-            echo "✅ Pushed state files to repo"
+            echo "✅ Pushed!"
           fi
 
       - name: Upload motivation image as artifact
