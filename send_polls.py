@@ -120,7 +120,7 @@ def clean_latex(text: str) -> str:
 def extract_questions_from_groq(raw: str) -> list:
     """
     Robustly extract and VALIDATE a list of question dicts from Groq response.
-    Only returns questions that have all required fields with valid values.
+    Handles: plain array, wrapped object, question1/question2 keys, markdown fences.
     """
     # Strip markdown fences
     if "```" in raw:
@@ -141,23 +141,43 @@ def extract_questions_from_groq(raw: str) -> list:
         log(f"[WARN] JSON parse failed: {e} — Raw: {raw[:200]}")
         return []
 
-    # Unwrap if Groq returned object instead of array
-    if isinstance(parsed, dict):
-        questions = []
+    questions = []
+
+    if isinstance(parsed, list):
+        # Plain array — ideal case
+        questions = parsed
+
+    elif isinstance(parsed, dict):
+        # Case 1: wrapped array e.g. {"questions": [...]}
         for val in parsed.values():
             if isinstance(val, list) and len(val) > 0 and isinstance(val[0], dict):
-                if "question" in val[0] or "question_text" in val[0]:
-                    questions = val
-                    break
+                questions = val
+                break
+
+        # Case 2: Groq used "question1", "question2"... keys
+        # e.g. {"question1": {...}, "question2": {...}}
+        if not questions:
+            numbered = []
+            for key, val in parsed.items():
+                if isinstance(val, dict) and (
+                    key.startswith("question") or
+                    key.startswith("q") or
+                    key[0].isdigit()
+                ):
+                    numbered.append(val)
+            if numbered:
+                log(f"[INFO] Detected numbered question keys — extracted {len(numbered)} items")
+                questions = numbered
+
+        # Case 3: fallback — collect any dict values that look like questions
         if not questions:
             for val in parsed.values():
-                if isinstance(val, list):
-                    questions = val
-                    break
-    elif isinstance(parsed, list):
-        questions = parsed
-    else:
-        return []
+                if isinstance(val, dict) and (
+                    "question" in val or "question_text" in val
+                ):
+                    questions.append(val)
+            if questions:
+                log(f"[INFO] Extracted {len(questions)} questions from dict values")
 
     # Validate each question — only keep fully valid ones
     valid = []
@@ -712,7 +732,7 @@ def run_quiz():
     questions = []
     attempts  = 0
 
-    while len(questions) < 5 and attempts < 5:
+    while len(questions) < 5 and attempts < 10:
         attempts += 1
         needed = 5 - len(questions)
         log(f"Attempt {attempts}: need {needed} more question(s)...")
@@ -733,11 +753,19 @@ def run_quiz():
         if len(questions) < 5:
             time.sleep(2)
 
-    if len(questions) < 5:
+    # Save whatever we have (even partial) so solution mode can still run
+    if questions:
+        save_json(TODAY_Q_FILE, questions[:5])
+        log(f"💾 Saved {min(len(questions),5)} questions to {TODAY_Q_FILE}")
+
+    if len(questions) < 3:
         msg = f"Quiz failed — only {len(questions)}/5 valid questions after {attempts} attempts."
         log(f"❌ {msg}")
         send_alert("❌ Lakshya Quiz FAILED", msg)
         sys.exit(1)
+
+    if len(questions) < 5:
+        log(f"⚠️  Only {len(questions)}/5 questions — proceeding with what we have")
 
     questions = questions[:5]
 
@@ -756,7 +784,7 @@ def run_quiz():
             log(f"  Poll {i+1}/5 [{q.get('subject','')}]")
             send_poll(group, q)
 
-    # Save for solution mode
+    # Save final questions for solution mode (update with full set)
     save_json(TODAY_Q_FILE, questions)
 
     # Update history
