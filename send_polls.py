@@ -796,7 +796,7 @@ def run_quiz():
     questions = []
     attempts  = 0
 
-    while len(questions) < 5 and attempts < 10:
+    while len(questions) < 5 and attempts < 8:
         attempts += 1
         needed = 5 - len(questions)
         log(f"Attempt {attempts}: need {needed} more question(s)...")
@@ -856,13 +856,10 @@ def run_quiz():
             log(f"  Poll {i+1}/5 [{q.get('subject','')}]")
             send_poll(group, q)
 
-    # Save questions — both locally and to Google Drive for solution mode
+    # Save questions locally — daily.yml will upload as artifact
     questions_data = {"date": str(date.today()), "questions": questions}
     save_json(TODAY_Q_FILE, questions_data)
-    try:
-        upload_json_to_drive(questions_data)
-    except Exception as e:
-        log(f"[WARN] Drive upload failed: {e}")
+    log(f"💾 Questions saved to {TODAY_Q_FILE}")
 
     # Update history
     for q in questions:
@@ -895,21 +892,9 @@ def run_solution():
         send_alert("❌ Solution mode failed — no questions file", msg)
         sys.exit(1)
 
-    # Try Drive first, fall back to local file
-    raw_data = {}
-    if GDRIVE_SA_JSON and GDRIVE_FOLDER_ID:
-        try:
-            raw_data = download_json_from_drive()
-            log(f"✅ Loaded questions from Google Drive")
-        except Exception as e:
-            log(f"[WARN] Drive read failed: {e} — trying local file")
+    raw_data = load_json(TODAY_Q_FILE, {})
 
-    if not raw_data:
-        raw_data = load_json(TODAY_Q_FILE, {})
-        if raw_data:
-            log("✅ Loaded questions from local file")
-
-    # Handle both formats
+    # Handle both formats: plain list (old) and {date, questions} (new)
     if isinstance(raw_data, list):
         questions = raw_data
     elif isinstance(raw_data, dict):
@@ -920,9 +905,9 @@ def run_solution():
         questions = []
 
     if not questions:
-        log("❌ No questions found in Drive or local file.")
-        send_alert("❌ Solution mode failed — no questions found", 
-                   "Neither Drive nor local todays_questions.json had questions. Did quiz mode run today?")
+        log("❌ Questions file empty or missing.")
+        send_alert("❌ Solution mode failed — no questions file",
+                   "todays_questions.json missing. Did quiz mode run today?")
         sys.exit(1)
 
     log(f"Loaded {len(questions)} questions.")
