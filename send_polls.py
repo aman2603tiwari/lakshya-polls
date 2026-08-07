@@ -755,7 +755,10 @@ def run_quiz():
 
     # Save whatever we have (even partial) so solution mode can still run
     if questions:
-        save_json(TODAY_Q_FILE, questions[:5])
+        save_json(TODAY_Q_FILE, {
+            "date": str(date.today()),
+            "questions": questions[:5]
+        })
         log(f"💾 Saved {min(len(questions),5)} questions to {TODAY_Q_FILE}")
 
     if len(questions) < 3:
@@ -784,8 +787,11 @@ def run_quiz():
             log(f"  Poll {i+1}/5 [{q.get('subject','')}]")
             send_poll(group, q)
 
-    # Save final questions for solution mode (update with full set)
-    save_json(TODAY_Q_FILE, questions)
+    # Save final questions for solution mode — include date so git always sees a change
+    save_json(TODAY_Q_FILE, {
+        "date": str(date.today()),
+        "questions": questions
+    })
 
     # Update history
     for q in questions:
@@ -818,7 +824,17 @@ def run_solution():
         send_alert("❌ Solution mode failed — no questions file", msg)
         sys.exit(1)
 
-    questions = load_json(TODAY_Q_FILE, [])
+    raw_data = load_json(TODAY_Q_FILE, {})
+    # Handle both formats: plain list (old) and {date, questions} (new)
+    if isinstance(raw_data, list):
+        questions = raw_data
+    elif isinstance(raw_data, dict):
+        questions = raw_data.get("questions", [])
+        saved_date = raw_data.get("date", "unknown")
+        log(f"Questions from: {saved_date}")
+    else:
+        questions = []
+
     if not questions:
         log("❌ Questions file is empty.")
         sys.exit(1)
