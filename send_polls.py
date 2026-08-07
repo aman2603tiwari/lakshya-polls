@@ -391,14 +391,78 @@ def send_poll(group, question):
 
 # ─── GOOGLE DRIVE HELPERS ─────────────────────────────────────────────────────
 
-def get_drive_service():
+def get_questions_drive_filename() -> str:
+    """Filename includes today's date — e.g. lakshya_questions_2026-08-07.json"""
+    return f"lakshya_questions_{date.today()}.json"
+
+def get_drive_service(readonly=True):
     from google.oauth2 import service_account
     from googleapiclient.discovery import build
     sa_info = json.loads(GDRIVE_SA_JSON)
+    scope   = "https://www.googleapis.com/auth/drive.readonly" if readonly else "https://www.googleapis.com/auth/drive"
     creds   = service_account.Credentials.from_service_account_info(
-        sa_info, scopes=["https://www.googleapis.com/auth/drive.readonly"]
+        sa_info, scopes=[scope]
     )
     return build("drive", "v3", credentials=creds, cache_discovery=False)
+
+
+def upload_json_to_drive(data: dict):
+    """Save questions JSON to a fixed file in Drive — overwrites each day."""
+    import io
+    from googleapiclient.http import MediaIoBaseUpload
+
+    service  = get_drive_service(readonly=False)
+    content  = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+    media    = MediaIoBaseUpload(io.BytesIO(content), mimetype="application/json")
+
+    # Check if file already exists in the folder
+    filename = get_questions_drive_filename()
+    results  = service.files().list(
+        q=f"'{GDRIVE_FOLDER_ID}' in parents and name='{filename}' and trashed=false",
+        fields="files(id, name)"
+    ).execute()
+    existing = results.get("files", [])
+
+    if existing:
+        service.files().update(
+            fileId=existing[0]["id"],
+            media_body=media
+        ).execute()
+        log(f"✅ Updated {filename} in Drive")
+    else:
+        metadata = {"name": filename, "parents": [GDRIVE_FOLDER_ID]}
+        service.files().create(
+            body=metadata,
+            media_body=media,
+            fields="id"
+        ).execute()
+        log(f"✅ Created {filename} in Drive")
+
+
+def download_json_from_drive() -> dict:
+    """Read today's questions JSON from Drive."""
+    import io
+
+    service = get_drive_service(readonly=True)
+    filename = get_questions_drive_filename()
+    results  = service.files().list(
+        q=f"'{GDRIVE_FOLDER_ID}' in parents and name='{filename}' and trashed=false",
+        fields="files(id, name)"
+    ).execute()
+    files = results.get("files", [])
+
+    if not files:
+        raise FileNotFoundError(f"{filename} not found in Drive — did quiz mode run today?")
+
+    from googleapiclient.http import MediaIoBaseDownload
+    request  = service.files().get_media(fileId=files[0]["id"])
+    fh       = io.BytesIO()
+    dl       = MediaIoBaseDownload(fh, request)
+    done     = False
+    while not done:
+        _, done = dl.next_chunk()
+    fh.seek(0)
+    return json.loads(fh.read().decode("utf-8"))
 
 
 def list_drive_photos(service):
@@ -755,11 +819,16 @@ def run_quiz():
 
     # Save whatever we have (even partial) so solution mode can still run
     if questions:
-        save_json(TODAY_Q_FILE, {
+        partial = {
             "date": str(date.today()),
             "questions": questions[:5]
-        })
-        log(f"💾 Saved {min(len(questions),5)} questions to {TODAY_Q_FILE}")
+        }
+        save_json(TODAY_Q_FILE, partial)
+        try:
+            upload_json_to_drive(partial)
+        except Exception:
+            pass
+        log(f"💾 Saved {min(len(questions),5)} questions")
 
     if len(questions) < 3:
         msg = f"Quiz failed — only {len(questions)}/5 valid questions after {attempts} attempts."
@@ -787,11 +856,13 @@ def run_quiz():
             log(f"  Poll {i+1}/5 [{q.get('subject','')}]")
             send_poll(group, q)
 
-    # Save final questions for solution mode — include date so git always sees a change
-    save_json(TODAY_Q_FILE, {
-        "date": str(date.today()),
-        "questions": questions
-    })
+    # Save questions — both locally and to Google Drive for solution mode
+    questions_data = {"date": str(date.today()), "questions": questions}
+    save_json(TODAY_Q_FILE, questions_data)
+    try:
+        upload_json_to_drive(questions_data)
+    except Exception as e:
+        log(f"[WARN] Drive upload failed: {e}")
 
     # Update history
     for q in questions:
@@ -824,8 +895,21 @@ def run_solution():
         send_alert("❌ Solution mode failed — no questions file", msg)
         sys.exit(1)
 
-    raw_data = load_json(TODAY_Q_FILE, {})
-    # Handle both formats: plain list (old) and {date, questions} (new)
+    # Try Drive first, fall back to local file
+    raw_data = {}
+    if GDRIVE_SA_JSON and GDRIVE_FOLDER_ID:
+        try:
+            raw_data = download_json_from_drive()
+            log(f"✅ Loaded questions from Google Drive")
+        except Exception as e:
+            log(f"[WARN] Drive read failed: {e} — trying local file")
+
+    if not raw_data:
+        raw_data = load_json(TODAY_Q_FILE, {})
+        if raw_data:
+            log("✅ Loaded questions from local file")
+
+    # Handle both formats
     if isinstance(raw_data, list):
         questions = raw_data
     elif isinstance(raw_data, dict):
@@ -836,7 +920,9 @@ def run_solution():
         questions = []
 
     if not questions:
-        log("❌ Questions file is empty.")
+        log("❌ No questions found in Drive or local file.")
+        send_alert("❌ Solution mode failed — no questions found", 
+                   "Neither Drive nor local todays_questions.json had questions. Did quiz mode run today?")
         sys.exit(1)
 
     log(f"Loaded {len(questions)} questions.")
