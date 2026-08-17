@@ -913,9 +913,16 @@ def run_solution():
     log(f"Loaded {len(questions)} questions.")
     letters = ["A", "B", "C", "D"]
 
+    success = 0
+    fail    = 0
+
     for group in GROUPS:
         log(f"\n── {group['name']} ──")
-        send_message(group, "🎯 Solutions to today's quiz are here! Check your answers 👇")
+        ok = send_message(group, "🎯 Solutions to today's quiz are here! Check your answers 👇")
+        if not ok:
+            log(f"  ⚠️ Intro failed for {group['name']} — skipping solutions for this group")
+            fail += len(questions)
+            continue
         time.sleep(1)
 
         for i, q in enumerate(questions):
@@ -934,11 +941,27 @@ def run_solution():
                 f"✅ Correct Answer: ({correct_letter}) {correct_text}\n\n"
                 f"📝 Explanation:\n{soln}"
             )
-            send_message(group, sol_msg)
+            ok2 = send_message(group, sol_msg)
+            if ok2:
+                success += 1
+            else:
+                fail += 1
             time.sleep(1.5)
 
-    log("✅ Solution mode complete.")
-    send_alert("✅ Solutions Sent", f"5 solutions sent to all 5 groups.\nDate: {date.today()}")
+    total = len(questions) * len(GROUPS)
+    log(f"Solution results: {success}/{total} sent, {fail}/{total} failed")
+
+    if success == 0:
+        log("❌ All solutions failed — token likely expired")
+        send_alert("❌ Solutions FAILED — Token likely expired",
+                   f"0 solutions sent.\nFix: refresh PW_TOKEN in GitHub Secrets.\nDate: {date.today()}")
+        sys.exit(1)
+    elif fail > 0:
+        send_alert(f"⚠️ Solutions — {fail} messages failed",
+                   f"Sent: {success}/{total}\nFailed: {fail}/{total}\nDate: {date.today()}")
+    else:
+        log("✅ Solution mode complete.")
+        send_alert("✅ Solutions Sent", f"All {success} solutions sent.\nDate: {date.today()}")
 
 
 # ─── MODE: CHECKIN (5 PM daily) ───────────────────────────────────────────────
@@ -960,15 +983,29 @@ def run_checkin():
 
     log(f"Message: {message[:80]}...")
 
+    success = 0
+    fail    = 0
     for group in GROUPS:
         log(f"Sending to {group['name']}...")
-        if header:
-            send_message(group, header)
-            time.sleep(0.5)
-        send_message(group, message)
+        ok = send_message(group, message)
+        if ok:
+            success += 1
+        else:
+            fail += 1
 
-    log("✅ Checkin mode complete.")
-    send_alert(email_subject, f"Checkin sent to all 5 groups.\nDate: {date.today()}")
+    log(f"Checkin results: {success}/5 sent, {fail}/5 failed")
+
+    if success == 0:
+        log("❌ All groups failed — token likely expired")
+        send_alert("❌ Checkin FAILED — Token likely expired",
+                   f"0/5 groups received checkin.\nFix: refresh PW_TOKEN in GitHub Secrets.\nDate: {date.today()}")
+        sys.exit(1)
+    elif fail > 0:
+        send_alert(f"⚠️ Checkin — {fail} groups failed",
+                   f"Sent: {success}/5\nFailed: {fail}/5\nDate: {date.today()}")
+    else:
+        log("✅ Checkin mode complete.")
+        send_alert(email_subject, f"Checkin sent to all 5 groups.\nDate: {date.today()}")
 
 
 # ─── MODE: COLLEGE (3 PM Mon-Wed-Fri) ────────────────────────────────────────
