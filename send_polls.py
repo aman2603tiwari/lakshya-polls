@@ -634,7 +634,6 @@ Return ONLY JSON: {"quote": "quote text"}"""
 
 
 # ─── GROQ: COLLEGE CAPTION ────────────────────────────────────────────────────
-
 def generate_college_caption(photo_name):
     prompt = f"""Write a short punchy caption to send with an IIT campus photo to JEE aspirants.
 
@@ -648,16 +647,30 @@ Rules:
 - No hashtags
 
 Return ONLY the caption text."""
-    resp = groq_client.chat.completions.create(
-        model="openai/gpt-oss-20b",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.92,
-        max_tokens=100,
-        include_reasoning=False,
-    )
-    return resp.choices[0].message.content.strip()
 
+    try:
+        resp = groq_client.chat.completions.create(
+            model="openai/gpt-oss-20b",
+            messages=[{"role": "user", "content": prompt}],
+            reasoning_effort="low",
+            max_completion_tokens=300,
+            include_reasoning=False,
+        )
 
+        message = resp.choices[0].message
+        content = (message.content or "").strip()
+
+        log(f"[DEBUG] GPT-OSS caption response: {message}")
+
+        if content:
+            return content
+
+        log("[WARN] GPT-OSS returned empty caption. Using fallback.")
+        return "One day, this could be your campus. Keep working towards it. 🎯"
+
+    except Exception as e:
+        log(f"[WARN] Caption generation failed: {e}")
+        return "Your IIT journey starts with what you do today. Keep moving. 🎯"
 # ─── GROQ: DAILY CHECKIN ──────────────────────────────────────────────────────
 
 def generate_daily_checkin_message():
