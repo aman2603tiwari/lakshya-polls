@@ -491,75 +491,221 @@ def download_drive_photo(service, file_id, dest_path):
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 
-def sample_pyq_text(subject, chars=3000):
+# ─── GROQ: PYQ SAMPLING ───────────────────────────────────────────────────────
+
+def sample_pyq_text(subject, chars=700):
+    """
+    Return a small deterministic PYQ sample for the given subject.
+
+    Keep this deliberately small because Groq's free/on-demand TPM limit
+    applies to the complete request.
+    """
     fname = PDF_DIR / f"{subject.lower()}_pyq.txt"
+
     if not fname.exists():
         return f"[No PYQ file for {subject} — use general JEE knowledge]"
-    text  = fname.read_text(encoding="utf-8", errors="ignore")
+
+    text = fname.read_text(encoding="utf-8", errors="ignore")
+
     if len(text) <= chars:
         return text
-    seed  = date.today().toordinal() * 100 + hash(subject) % 100
-    random.seed(seed)
-    start = random.randint(0, len(text) - chars)
-    chunk = text[start: start + chars]
-    nl    = chunk.find("\n")
+
+    # Deterministic but different sample for each subject/day.
+    seed = date.today().toordinal() * 100 + hash(subject) % 100
+    rng = random.Random(seed)
+
+    start = rng.randint(0, len(text) - chars)
+    chunk = text[start:start + chars]
+
+    # Try not to start in the middle of a question.
+    nl = chunk.find("\n")
+
     return chunk[nl:].strip() if nl > 0 else chunk.strip()
 
 
 # ─── GROQ: GENERATE QUESTIONS ─────────────────────────────────────────────────
 
 def generate_questions(subjects):
-    subject_list  = "\n".join(f"Q{i+1}: {s}" for i, s in enumerate(subjects))
-    pyq_samples   = {s: sample_pyq_text(s) for s in set(subjects)}
-    context_block = "\n\n".join(
-        f"=== {s} PYQ SAMPLE ===\n{t}" for s, t in pyq_samples.items()
-    )
-    prompt = f"""You are a JEE question expert. Generate exactly 5 JEE PYQ questions.
+    """
+    Generate exactly 5 JEE PYQ-style questions using Groq Structured Outputs.
 
-Subject assignment:
+    GPT-OSS 20B supports strict JSON schema, so the response is guaranteed
+    to follow the expected structure.
+    """
+
+    subject_list = "\n".join(
+        f"Q{i+1}: {s}" for i, s in enumerate(subjects)
+    )
+
+    # Keep context small to stay safely within Groq TPM limits.
+    pyq_samples = {
+        s: sample_pyq_text(s, chars=600)
+        for s in set(subjects)
+    }
+
+    context_block = "\n\n".join(
+        f"=== {s} PYQ SAMPLE ===\n{t}"
+        for s, t in pyq_samples.items()
+    )
+
+    prompt = f"""
+You are an expert JEE Main and JEE Advanced question setter.
+
+Generate exactly 5 realistic JEE PYQ-style multiple-choice questions.
+
+SUBJECT ASSIGNMENT:
 {subject_list}
 
 PYQ MATERIAL:
 {context_block}
 
-RULES:
-- Each question MUST include exam year and session tag e.g. [JEE Main 2022 June S1] or [JEE Adv 2019 P2]
-- 4 options per question (A B C D) — specific values, not placeholders
-- correct is 1-4 (1=A, 2=B, 3=C, 4=D)
-- solution: 3-5 step working in plain text
-- CRITICAL: Do NOT use LaTeX backslashes like \\alpha \\frac \\theta \\sqrt
-- DO NOT USE QUESTIONS WHERE IMAGES ARE REFERRED OR PRESENT
-- Write math in plain text: "alpha" not "\\alpha", "x^2" not "x squared"
-- Backslashes break JSON parsing — plain text only
+Use the PYQ material only for style and difficulty.
+Do NOT copy it verbatim.
 
-Return ONLY a JSON array of exactly 5 objects, no markdown, no backticks:
-[
-  {{
-    "subject": "Physics",
-    "year_tag": "[JEE Main 2023 Jan S2]",
-    "question": "[JEE Main 2023 Jan S2] full question text here",
-    "options": ["A text", "B text", "C text", "D text"],
-    "correct": 2,
-    "solution": "Step 1: ...\\nStep 2: ...\\nAnswer: B"
-  }}
-]"""
+RULES:
+
+1. Generate exactly 5 questions.
+2. Follow the subject assignment exactly.
+3. Each question must have an exam year/session tag.
+4. Each question must have exactly 4 options.
+5. correct must be an integer from 1 to 4.
+6. Give a concise 2-4 step solution.
+7. Questions must be solvable using the standard JEE syllabus.
+8. Do NOT use images, graphs, diagrams or questions referring to them.
+9. Do NOT use LaTeX backslashes.
+10. Use plain text mathematics:
+    x^2
+    sqrt(x)
+    alpha
+    sin(theta)
+11. Avoid ambiguous or incomplete questions.
+12. Keep the question and solution concise.
+13. Return only the requested structured data.
+"""
 
     try:
+        log("[INFO] Calling Groq with strict JSON schema...")
+
         resp = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
+            model="openai/gpt-oss-20b",
+
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a precise JEE question-generation system. "
+                        "Follow the provided output schema exactly."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+
+            temperature=0.2,
+
+            # Keep this reasonably large because GPT-OSS can use
+            # reasoning tokens internally.
             max_tokens=3000,
-            response_format={"type": "json_object"},
+
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "jee_quiz_questions",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+
+                        "properties": {
+                            "questions": {
+                                "type": "array",
+                                "minItems": 5,
+                                "maxItems": 5,
+
+                                "items": {
+                                    "type": "object",
+
+                                    "properties": {
+                                        "subject": {
+                                            "type": "string"
+                                        },
+
+                                        "year_tag": {
+                                            "type": "string"
+                                        },
+
+                                        "question": {
+                                            "type": "string"
+                                        },
+
+                                        "options": {
+                                            "type": "array",
+                                            "minItems": 4,
+                                            "maxItems": 4,
+
+                                            "items": {
+                                                "type": "string"
+                                            }
+                                        },
+
+                                        "correct": {
+                                            "type": "integer",
+                                            "enum": [1, 2, 3, 4]
+                                        },
+
+                                        "solution": {
+                                            "type": "string"
+                                        }
+                                    },
+
+                                    "required": [
+                                        "subject",
+                                        "year_tag",
+                                        "question",
+                                        "options",
+                                        "correct",
+                                        "solution"
+                                    ],
+
+                                    "additionalProperties": False
+                                }
+                            }
+                        },
+
+                        "required": [
+                            "questions"
+                        ],
+
+                        "additionalProperties": False
+                    }
+                }
+            }
         )
+
         raw = resp.choices[0].message.content.strip()
-        log(f"[DEBUG] Groq raw (first 150): {raw[:150]}")
-        return extract_questions_from_groq(raw)
+
+        log(f"[DEBUG] Groq raw (first 300): {raw[:300]}")
+
+        # Because the schema returns:
+        #
+        # {
+        #   "questions": [...]
+        # }
+        #
+        # your existing parser already supports this format.
+        questions = extract_questions_from_groq(raw)
+
+        log(
+            f"[INFO] Groq generated "
+            f"{len(questions)} valid question(s)"
+        )
+
+        return questions
+
     except Exception as e:
-        log(f"[WARN] Groq call failed: {e}")
+        log(f"[WARN] Groq structured generation failed: {e}")
         return []
-
-
 # ─── GROQ: INTRO MESSAGE ──────────────────────────────────────────────────────
 
 def generate_intro_message(subjects):
@@ -579,7 +725,7 @@ Rules:
 
 Return ONLY the message text."""
     resp = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-20b",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.9,
         max_tokens=150,
@@ -614,7 +760,7 @@ Return ONLY JSON: {"quote": "quote text"}"""
     ]
     cat = categories[date.today().toordinal() % len(categories)]
     resp = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-20b",
         messages=[
             {"role": "system", "content": system},
             {"role": "user",   "content": f"Category: {cat}\nSeed: {date.today().toordinal()}"},
@@ -646,7 +792,7 @@ Rules:
 
 Return ONLY the caption text."""
     resp = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-20b",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.92,
         max_tokens=100,
@@ -673,7 +819,7 @@ Rules:
 
 Return ONLY the message text."""
     resp = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-20b",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.92,
         max_tokens=200,
@@ -699,7 +845,7 @@ Rules:
 
 Return ONLY the message text."""
     resp = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-20b",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.92,
         max_tokens=250,
