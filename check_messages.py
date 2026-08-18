@@ -1,19 +1,30 @@
 """
 check_messages.py — Lakshya JEE 2027 Student Message Monitor
 
-Checks PW mentorship conversations four times a day.
+Runs from GitHub Actions four times a day.
 
-- Ignores Aman/mentor messages
-- Detects new student messages
-- Sends Gmail alert
-- Persists seen message IDs
-- Does NOT fail the entire workflow because one group returns 403/404
+Behavior:
+    1. Check all five PW mentorship conversations.
+    2. Fetch the latest 50 messages from each conversation.
+    3. Compare message IDs against the persistent state.
+    4. Ignore messages sent by Aman.
+    5. If one or more NEW student messages exist:
+           -> send one email containing all student messages.
+    6. If there are NO new student messages:
+           -> still send one email saying:
+              "No new messages by any student."
+    7. Save the latest message IDs so messages are not reported twice.
+
+Important:
+    The first run establishes the baseline and does NOT report old
+    messages as new.
 """
 
 import json
 import os
 import smtplib
 import sys
+
 from datetime import datetime, timezone, timedelta
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -22,20 +33,23 @@ import requests
 
 
 # ============================================================
-# CONFIG
+# CONFIGURATION
 # ============================================================
 
 BASE_URL = "https://api.penpencil.co"
 
 CLIENT_ID = "5eb393ee95fab7468a79d189"
 
-# This is your sender ID from the actual PW response.
+# Aman Tiwari's sender ID obtained from the actual PW API response.
 MY_SENDER_ID = "69ca46ebb7bb9d3b7e522108"
 
 STATE_FILE = Path("message_monitor_state.json")
 
 
-# These are the IDs currently present in send_polls.py
+# ============================================================
+# FIVE PW GROUPS
+# ============================================================
+
 GROUPS = [
     {
         "name": "Group 1",
@@ -66,7 +80,7 @@ GROUPS = [
 
 
 # ============================================================
-# SECRETS
+# GITHUB SECRETS
 # ============================================================
 
 PW_TOKEN = os.environ["PW_TOKEN"]
@@ -75,7 +89,7 @@ GMAIL_APP_PWD = os.environ["GMAIL_APP_PWD"]
 
 
 # ============================================================
-# HEADERS
+# PW API HEADERS
 # ============================================================
 
 HEADERS = {
@@ -96,69 +110,87 @@ HEADERS = {
 def log(message):
     print(
         f"[{datetime.now().strftime('%H:%M:%S')}] {message}",
-        flush=True
+        flush=True,
     )
 
 
 # ============================================================
-# STATE
+# STATE MANAGEMENT
 # ============================================================
 
 def load_state():
 
     if not STATE_FILE.exists():
+
         return {
             "initialized": False,
-            "seen_ids": {}
+            "seen_ids": {},
         }
 
     try:
 
         state = json.loads(
-            STATE_FILE.read_text(encoding="utf-8")
+            STATE_FILE.read_text(
+                encoding="utf-8"
+            )
         )
 
         if not isinstance(state, dict):
-            raise ValueError("Invalid state format")
+            raise ValueError(
+                "State file is not a JSON object"
+            )
 
-        state.setdefault("initialized", False)
-        state.setdefault("seen_ids", {})
+        state.setdefault(
+            "initialized",
+            False
+        )
+
+        state.setdefault(
+            "seen_ids",
+            {}
+        )
 
         return state
 
     except Exception as e:
 
-        log(f"⚠️ Could not read state: {e}")
+        log(
+            f"⚠️ Could not read state file: {e}"
+        )
 
         return {
             "initialized": False,
-            "seen_ids": {}
+            "seen_ids": {},
         }
 
 
 def save_state(state):
 
-    temp_file = STATE_FILE.with_suffix(".tmp")
+    temp_file = STATE_FILE.with_suffix(
+        ".tmp"
+    )
 
     temp_file.write_text(
         json.dumps(
             state,
             ensure_ascii=False,
-            indent=2
+            indent=2,
         ),
-        encoding="utf-8"
+        encoding="utf-8",
     )
 
     temp_file.replace(STATE_FILE)
 
 
 # ============================================================
-# FETCH PW CHAT
+# FETCH MESSAGES
 # ============================================================
 
 def get_messages(group):
 
-    conversation_id = group["conversationId"]
+    conversation_id = group[
+        "conversationId"
+    ]
 
     url = (
         f"{BASE_URL}/v1/conversation/"
@@ -167,16 +199,18 @@ def get_messages(group):
 
     params = {
         "page": 1,
-        "limit": 50
+        "limit": 50,
     }
 
-    log(f"  GET {url}")
+    log(
+        f"  GET {url}?page=1&limit=50"
+    )
 
     response = requests.get(
         url,
         headers=HEADERS,
         params=params,
-        timeout=20
+        timeout=20,
     )
 
     log(
@@ -185,7 +219,7 @@ def get_messages(group):
     )
 
     # --------------------------------------------------------
-    # Authentication
+    # TOKEN EXPIRED
     # --------------------------------------------------------
 
     if response.status_code == 401:
@@ -195,29 +229,43 @@ def get_messages(group):
         )
 
     # --------------------------------------------------------
-    # Permission / inaccessible conversation
+    # GROUP NOT ACCESSIBLE
     # --------------------------------------------------------
 
-    if response.status_code in (403, 404):
+    if response.status_code in (
+        403,
+        404,
+    ):
 
         log(
-            f"  ⚠️ {group['name']} is not readable "
+            f"  ⚠️ {group['name']} "
+            f"is not readable "
             f"({response.status_code})"
         )
 
         return None
 
+    # --------------------------------------------------------
+    # OTHER HTTP ERROR
+    # --------------------------------------------------------
+
     response.raise_for_status()
 
     payload = response.json()
 
-    messages = payload.get("data", [])
+    messages = payload.get(
+        "data",
+        []
+    )
 
-    if not isinstance(messages, list):
+    if not isinstance(
+        messages,
+        list,
+    ):
 
         log(
-            f"  ⚠️ Unexpected response format: "
-            f"{str(payload)[:300]}"
+            "  ⚠️ Unexpected PW response "
+            "format."
         )
 
         return []
@@ -242,19 +290,33 @@ def message_sort_key(message):
 
     return (
         message_time(message),
-        str(message.get("_id", ""))
+        str(
+            message.get(
+                "_id",
+                ""
+            )
+        ),
     )
 
 
 def message_text(message):
 
-    text = message.get("text")
+    text = message.get(
+        "text"
+    )
 
-    if isinstance(text, str) and text.strip():
+    if (
+        isinstance(text, str)
+        and text.strip()
+    ):
+
         return text.strip()
 
     message_type = str(
-        message.get("type", "")
+        message.get(
+            "type",
+            ""
+        )
     ).lower()
 
     if message_type == "image":
@@ -264,6 +326,7 @@ def message_text(message):
         return "📊 Sent a poll."
 
     if message_type:
+
         return (
             f"[{message_type} message "
             f"with no text]"
@@ -280,7 +343,10 @@ def format_time(value):
     try:
 
         dt = datetime.fromisoformat(
-            value.replace("Z", "+00:00")
+            value.replace(
+                "Z",
+                "+00:00"
+            )
         )
 
         ist = dt.astimezone(
@@ -302,44 +368,181 @@ def format_time(value):
 
 
 # ============================================================
-# EMAIL
+# EMAIL — NEW STUDENT MESSAGES
 # ============================================================
 
-def send_email(new_messages):
-
-    if not new_messages:
-        return
+def send_student_messages_email(
+    new_messages,
+    checked_at,
+    inaccessible_groups,
+):
 
     subject = (
-        f"🔔 Lakshya JEE 2027 — "
-        f"{len(new_messages)} new student message(s)"
+        "🔔 Lakshya JEE 2027 — "
+        f"{len(new_messages)} New Student Message"
+    )
+
+    if len(new_messages) != 1:
+        subject += "s"
+
+    lines = [
+        "New student message(s) detected "
+        "in your PW Lakshya JEE 2027 groups.",
+        "",
+        f"Monitor check time: "
+        f"{checked_at}",
+        "",
+    ]
+
+    for index, item in enumerate(
+        new_messages,
+        start=1,
+    ):
+
+        lines.extend(
+            [
+                "=" * 60,
+                f"STUDENT MESSAGE #{index}",
+                "=" * 60,
+                "",
+                f"Group: {item['group_name']}",
+                f"Student: {item['sender_name']}",
+                f"Message time: "
+                f"{format_time(item['created_at'])}",
+                f"Type: {item['type']}",
+                "",
+                "Message:",
+                item["text"],
+                "",
+            ]
+        )
+
+    if inaccessible_groups:
+
+        lines.extend(
+            [
+                "",
+                "-" * 60,
+                "WARNING",
+                "-" * 60,
+                "",
+                "The following groups could not be checked:",
+                "",
+            ]
+        )
+
+        for group in inaccessible_groups:
+            lines.append(
+                f"- {group['name']} "
+                f"({group['status']})"
+            )
+
+    body = "\n".join(lines)
+
+    send_email(
+        subject,
+        body,
+    )
+
+
+# ============================================================
+# EMAIL — NO NEW STUDENT MESSAGES
+# ============================================================
+
+def send_no_messages_email(
+    checked_at,
+    checked_groups,
+    inaccessible_groups,
+    own_new_messages,
+):
+
+    subject = (
+        "✅ Lakshya JEE 2027 — "
+        "No New Student Messages"
     )
 
     lines = [
-        "New student message(s) detected.",
-        ""
+        "No new messages by any student.",
+        "",
+        f"Monitor check time: "
+        f"{checked_at}",
+        "",
+        "Summary:",
+        f"- Groups checked successfully: "
+        f"{checked_groups}/5",
+        f"- New messages sent by Aman: "
+        f"{own_new_messages}",
+        "- New messages by students: 0",
+        "",
     ]
 
-    for item in new_messages:
+    if inaccessible_groups:
 
-        lines.extend([
-            f"Group: {item['group_name']}",
-            f"Student: {item['sender_name']}",
-            f"Time: {format_time(item['created_at'])}",
-            f"Type: {item['type']}",
+        lines.extend(
+            [
+                "⚠️ WARNING:",
+                "",
+                "Some groups could not be checked:",
+                "",
+            ]
+        )
+
+        for group in inaccessible_groups:
+
+            lines.append(
+                f"- {group['name']} "
+                f"({group['status']})"
+            )
+
+        lines.extend(
+            [
+                "",
+                "Therefore this is NOT a complete "
+                "five-group check.",
+                "",
+            ]
+        )
+
+    else:
+
+        lines.extend(
+            [
+                "All 5 PW groups were checked "
+                "successfully.",
+                "",
+            ]
+        )
+
+    lines.extend(
+        [
+            "Result:",
             "",
-            item["text"],
-            "",
-            "-" * 60,
-            ""
-        ])
+            "No new message from any student "
+            "was detected.",
+        ]
+    )
 
     body = "\n".join(lines)
+
+    send_email(
+        subject,
+        body,
+    )
+
+
+# ============================================================
+# COMMON EMAIL SENDER
+# ============================================================
+
+def send_email(
+    subject,
+    body,
+):
 
     message = MIMEText(
         body,
         "plain",
-        "utf-8"
+        "utf-8",
     )
 
     message["Subject"] = subject
@@ -349,19 +552,20 @@ def send_email(new_messages):
     with smtplib.SMTP_SSL(
         "smtp.gmail.com",
         465,
-        timeout=30
+        timeout=30,
     ) as smtp:
 
         smtp.login(
             ALERT_EMAIL,
-            GMAIL_APP_PWD
+            GMAIL_APP_PWD,
         )
 
-        smtp.send_message(message)
+        smtp.send_message(
+            message
+        )
 
     log(
-        f"📧 Email sent for "
-        f"{len(new_messages)} student message(s)"
+        f"📧 Email sent: {subject}"
     )
 
 
@@ -371,7 +575,34 @@ def send_email(new_messages):
 
 def main():
 
-    log("🚀 Student-message monitor starting")
+    log(
+        "🚀 Student-message monitor starting"
+    )
+
+    # --------------------------------------------------------
+    # Current check time
+    # --------------------------------------------------------
+
+    checked_at = datetime.now(
+        timezone.utc
+    ).astimezone(
+        timezone(
+            timedelta(
+                hours=5,
+                minutes=30
+            )
+        )
+    ).strftime(
+        "%d %b %Y, %I:%M:%S %p IST"
+    )
+
+    log(
+        f"Check time: {checked_at}"
+    )
+
+    # --------------------------------------------------------
+    # Load persistent state
+    # --------------------------------------------------------
 
     state = load_state()
 
@@ -385,15 +616,24 @@ def main():
         {}
     )
 
-    next_seen = dict(seen_ids)
+    next_seen = dict(
+        seen_ids
+    )
 
-    all_new_messages = []
+    # --------------------------------------------------------
+    # Results
+    # --------------------------------------------------------
 
-    readable_groups = 0
-    inaccessible_groups = 0
+    all_new_student_messages = []
+
+    checked_groups = 0
+
+    inaccessible_groups = []
+
+    own_new_messages = 0
 
     # ========================================================
-    # CHECK EVERY GROUP
+    # CHECK ALL FIVE GROUPS
     # ========================================================
 
     for group in GROUPS:
@@ -404,7 +644,9 @@ def main():
 
         try:
 
-            messages = get_messages(group)
+            messages = get_messages(
+                group
+            )
 
             # ------------------------------------------------
             # 403 / 404
@@ -412,11 +654,20 @@ def main():
 
             if messages is None:
 
-                inaccessible_groups += 1
+                inaccessible_groups.append(
+                    {
+                        "name": group["name"],
+                        "status": "403/404",
+                    }
+                )
 
                 continue
 
-            readable_groups += 1
+            checked_groups += 1
+
+            # ------------------------------------------------
+            # Sort oldest → newest
+            # ------------------------------------------------
 
             messages = sorted(
                 messages,
@@ -441,9 +692,13 @@ def main():
             if not initialized:
 
                 current_ids = [
-                    str(m["_id"])
-                    for m in messages
-                    if m.get("_id")
+                    str(
+                        message["_id"]
+                    )
+                    for message in messages
+                    if message.get(
+                        "_id"
+                    )
                 ]
 
                 next_seen[
@@ -458,23 +713,34 @@ def main():
                 continue
 
             # =================================================
-            # FIND NEW STUDENT MESSAGES
+            # FIND NEW MESSAGES
             # =================================================
 
-            group_new = []
+            group_student_messages = []
 
             for message in messages:
 
-                message_id = message.get("_id")
+                message_id = message.get(
+                    "_id"
+                )
 
                 if not message_id:
                     continue
 
-                message_id = str(message_id)
+                message_id = str(
+                    message_id
+                )
 
-                # Already seen
+                # ------------------------------------------------
+                # Already processed
+                # ------------------------------------------------
+
                 if message_id in previous_ids:
                     continue
+
+                # ------------------------------------------------
+                # New message
+                # ------------------------------------------------
 
                 sender_id = str(
                     message.get(
@@ -483,11 +749,26 @@ def main():
                     )
                 )
 
-                # Ignore Aman
+                # ------------------------------------------------
+                # OUR OWN MESSAGE
+                # ------------------------------------------------
+
                 if sender_id == MY_SENDER_ID:
+
+                    own_new_messages += 1
+
+                    log(
+                        f"  ↳ New message from Aman "
+                        f"ignored: {message_id}"
+                    )
+
                     continue
 
-                group_new.append({
+                # ------------------------------------------------
+                # STUDENT MESSAGE
+                # ------------------------------------------------
+
+                student_message = {
                     "group_name": group["name"],
                     "sender_name": (
                         message.get(
@@ -512,38 +793,51 @@ def main():
                     ),
                     "text": message_text(
                         message
-                    )
-                })
+                    ),
+                }
 
-            all_new_messages.extend(
-                group_new
+                group_student_messages.append(
+                    student_message
+                )
+
+            # ------------------------------------------------
+            # Add this group's student messages
+            # ------------------------------------------------
+
+            all_new_student_messages.extend(
+                group_student_messages
             )
 
-            # ------------------------------------------------
-            # Save all fetched IDs
-            # ------------------------------------------------
+            log(
+                f"  New student messages: "
+                f"{len(group_student_messages)}"
+            )
+
+            # =================================================
+            # SAVE ALL FETCHED MESSAGE IDS
+            # =================================================
 
             fetched_ids = [
-                str(m["_id"])
-                for m in messages
-                if m.get("_id")
+                str(
+                    message["_id"]
+                )
+                for message in messages
+                if message.get(
+                    "_id"
+                )
             ]
 
-            merged = list(
+            merged_ids = list(
                 dict.fromkeys(
                     list(previous_ids)
                     + fetched_ids
                 )
             )
 
+            # Keep only the most recent 200 IDs.
             next_seen[
                 conversation_id
-            ] = merged[-200:]
-
-            log(
-                f"  New student messages: "
-                f"{len(group_new)}"
-            )
+            ] = merged_ids[-200:]
 
         except Exception as e:
 
@@ -551,7 +845,14 @@ def main():
                 f"  ❌ {group['name']} error: {e}"
             )
 
-            # Don't kill all other groups.
+            inaccessible_groups.append(
+                {
+                    "name": group["name"],
+                    "status": str(e),
+                }
+            )
+
+            # Continue checking other groups.
             continue
 
     # ========================================================
@@ -559,58 +860,113 @@ def main():
     # ========================================================
 
     state["seen_ids"] = next_seen
+
+    # The baseline is considered established after the first
+    # run, even if some groups were temporarily inaccessible.
     state["initialized"] = True
 
-    save_state(state)
+    save_state(
+        state
+    )
+
+    log(
+        "💾 Monitor state saved."
+    )
 
     # ========================================================
-    # EMAIL
+    # SEND EXACTLY ONE EMAIL
     # ========================================================
 
-    if all_new_messages:
+    if all_new_student_messages:
 
-        send_email(
-            all_new_messages
+        # ----------------------------------------------------
+        # STUDENT MESSAGES EXIST
+        # ----------------------------------------------------
+
+        send_student_messages_email(
+            new_messages=all_new_student_messages,
+            checked_at=checked_at,
+            inaccessible_groups=inaccessible_groups,
+        )
+
+    else:
+
+        # ----------------------------------------------------
+        # NO NEW STUDENT MESSAGES
+        #
+        # This includes:
+        #   - No new messages at all
+        #   - Only Aman sent new messages
+        # ----------------------------------------------------
+
+        send_no_messages_email(
+            checked_at=checked_at,
+            checked_groups=checked_groups,
+            inaccessible_groups=inaccessible_groups,
+            own_new_messages=own_new_messages,
         )
 
     # ========================================================
-    # SUMMARY
+    # FINAL LOG SUMMARY
     # ========================================================
 
     log("")
-    log("========================================")
-    log("MONITOR SUMMARY")
-    log("========================================")
-
     log(
-        f"Readable groups: "
-        f"{readable_groups}/5"
+        "========================================"
     )
 
     log(
-        f"Inaccessible groups: "
-        f"{inaccessible_groups}/5"
+        "MONITOR SUMMARY"
     )
 
     log(
-        f"New student messages: "
-        f"{len(all_new_messages)}"
+        "========================================"
+    )
+
+    log(
+        f"Groups checked successfully: "
+        f"{checked_groups}/5"
+    )
+
+    log(
+        f"Groups inaccessible/failed: "
+        f"{len(inaccessible_groups)}/5"
+    )
+
+    log(
+        f"New messages by Aman: "
+        f"{own_new_messages}"
+    )
+
+    log(
+        f"New messages by students: "
+        f"{len(all_new_student_messages)}"
     )
 
     if inaccessible_groups:
 
         log(
-            "⚠️ Some conversations returned "
-            "403/404. Their IDs need to be "
-            "verified from PW Network requests."
+            "⚠️ Some groups could not be checked."
         )
 
-    log("========================================")
-    log("✅ Monitor run complete")
+        for group in inaccessible_groups:
+
+            log(
+                f"   - {group['name']}: "
+                f"{group['status']}"
+            )
+
+    log(
+        "========================================"
+    )
+
+    log(
+        "✅ Monitor run complete"
+    )
 
 
 # ============================================================
-# ENTRY
+# ENTRY POINT
 # ============================================================
 
 if __name__ == "__main__":
