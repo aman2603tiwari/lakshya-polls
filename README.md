@@ -8,7 +8,7 @@ Fully automated daily content delivery to PW (PhysicsWallah) mentorship groups u
 
 | Time | What gets sent | Where |
 |---|---|---|
-| **8:00 AM** daily | AI-generated motivational quote (text) | All 5 groups |
+| **8:00 AM** daily | AI-generated motivational image | All 5 groups |
 | **1:00 PM** Mon–Fri | Intro message + 5 JEE PYQ polls | All 5 groups |
 | **3:00 PM** Mon/Wed/Fri | Random IIT campus photo + AI caption | All 5 groups |
 | **5:00 PM** daily | Evening check-in (Saturday = weekly review) | All 5 groups |
@@ -32,14 +32,27 @@ Everything runs on GitHub's free servers. **Your PC does not need to be on.**
 
 1. Go to [github.com](https://github.com) → **New repository**
 2. Name it `lakshya-polls` → set to **Private** → Create
-3. Upload these files to the repo root:
+3. Upload these files to the repo:
    - `send_polls.py`
+   - `generate_motivation.py`
+   - `Montserrat-Bold.ttf`
+   - `Montserrat-Regular.ttf`
+   - `Montserrat-Italic.ttf`
    - `.github/workflows/daily.yml`
 
 Your repo structure should look like:
 ```
 lakshya-polls/
 ├── send_polls.py
+├── generate_motivation.py
+├── Montserrat-Bold.ttf
+├── Montserrat-Regular.ttf
+├── Montserrat-Italic.ttf
+├── motivation_images/
+├── pdfs/
+│   ├── physics_pyq.txt
+│   ├── chemistry_pyq.txt
+│   └── maths_pyq.txt
 └── .github/
     └── workflows/
         └── daily.yml
@@ -119,7 +132,7 @@ Add all of these:
 
 | Secret Name | Value | Notes |
 |---|---|---|
-| `PW_TOKEN` | `Bearer eyJ0eXAiOiJKV1Q...` | Full value Excluding "Bearer " |
+| `PW_TOKEN` | `Bearer eyJ0eXAiOiJKV1Q...` | Full Authorization value including `Bearer ` |
 | `GROQ_API_KEY` | `gsk_...` | From console.groq.com |
 | `ALERT_EMAIL` | `your@gmail.com` | Where email alerts go |
 | `GMAIL_APP_PWD` | `abcdabcdabcdabcd` | 16 chars, no spaces |
@@ -164,11 +177,60 @@ Skip this step if you don't want the college photo feature.
 Run each mode manually to verify everything works:
 
 1. Actions tab → **Lakshya JEE 2027 — Daily Automation** → **Run workflow**
-2. Select `motivation` → Run → wait ~30 seconds → check your groups
-3. Repeat with `quiz` → check that polls appear in all groups
-4. Repeat with `solution` → check that solutions appear
+2. Select `motivation` → Run → check that a generated image appears in all groups
+3. Repeat with `quiz` → check that 5 polls appear in all groups
+4. Repeat with `college` → check that an IIT photo + caption appear
+5. Repeat with `checkin` → check the evening message
+6. Repeat with `solution` → check that solutions appear (quiz must have run first)
 
 Green checkmark ✅ = success. Red ✗ = click the run → click "run" job → scroll logs to find the error.
+
+---
+
+## Morning Motivation Image
+
+Every day at **8:00 AM IST**, Lakshya generates a new motivational image and sends it to all five PW mentorship groups.
+
+### Pipeline
+
+```text
+GitHub Actions
+      │
+      ▼
+send_polls.py --mode=motivation
+      │
+      ▼
+generate_motivation.py
+      │
+      ├── Groq → JEE-focused motivational quote
+      │
+      └── Pillow → 1080×1080 image
+      │
+      ▼
+motivation_YYYY-MM-DD.jpg
+      │
+      ▼
+PW file upload API
+      │
+      ▼
+Same image sent to all 5 groups
+```
+
+`generate_motivation.py` handles the quote generation and image rendering. It uses the committed Montserrat fonts and stores the generated image under `motivation_images/`. The production motivation mode uploads the image once and reuses the returned image ID for all five groups. The temporary image is deleted from the GitHub runner after delivery.
+
+Manual image generation:
+
+```bash
+python generate_motivation.py
+```
+
+Preview generation:
+
+```bash
+python generate_motivation.py --preview 6
+```
+
+The motivation mode sends the **image itself**, not the quote as a separate text message.
 
 ---
 
@@ -236,22 +298,43 @@ The script auto-detects and uses these if present. Without them, Groq uses its o
 
 ## How the Script Works Internally
 
-```
-Quiz mode (1 PM):
-  1. Picks today's subject mix from SUBJECT_MIXES
-  2. Samples random 3000 chars from PYQ text files
-  3. Calls Groq llama-3.3-70b-versatile → gets 5 questions as JSON
-  4. Validates each question (must have question, 4 options, correct answer)
-  5. Retries up to 8 times if malformed questions returned
-  6. Calls Groq again for a fresh intro message
-  7. Sends intro + 5 polls to each group (two-step: create-poll API → post to chat)
-  8. Saves questions to todays_questions.json + Google Drive for solution mode
+### Motivation mode (8 AM)
+1. Calls `generate_motivation.py`.
+2. Groq generates a JEE-focused motivational quote.
+3. Pillow renders it into a 1080×1080 image.
+4. The image is uploaded once to PW.
+5. The same uploaded image is sent to all 5 groups.
+6. The temporary image is removed from the GitHub runner.
+7. Email alert reports success or failure.
 
-Solution mode (10 PM):
-  1. Reads todays_questions.json (from Drive or local cache)
-  2. For each group: sends "solutions coming" message + 5 solution messages
-  3. Each solution shows: question, correct answer, step-by-step explanation
-```
+### Quiz mode (1 PM, Mon–Fri)
+1. Picks today's subject mix from `SUBJECT_MIXES`.
+2. Samples a small amount of PYQ text from the subject files.
+3. Calls Groq GPT-OSS 20B with strict JSON Schema structured output.
+4. Validates each generated question.
+5. Retries up to 3 generation attempts if necessary.
+6. Generates a fresh intro message.
+7. Sends the intro + 5 polls to each group.
+8. Saves questions for the 10 PM solution mode.
+
+### College mode (3 PM, Mon/Wed/Fri)
+1. Connects to Google Drive.
+2. Finds unsent IIT campus photos.
+3. Selects and downloads one photo.
+4. Generates an AI caption.
+5. Uploads the photo to PW.
+6. Sends the photo and caption to all 5 groups.
+7. Marks the photo as sent.
+
+### Check-in mode (5 PM)
+1. Generates a daily check-in message.
+2. On Saturday, generates the weekly review instead.
+3. Sends the message to all 5 groups.
+
+### Solution mode (10 PM, Mon–Fri)
+1. Loads the day's saved questions.
+2. Reads each correct answer and stored solution.
+3. Sends the solution for each question to all 5 groups.
 
 ---
 
@@ -259,12 +342,17 @@ Solution mode (10 PM):
 
 | File | Purpose | Edit? |
 |---|---|---|
-| `send_polls.py` | Main script — all 5 modes | Edit `GROUPS`, `BATCH_ID`, prompts |
-| `.github/workflows/daily.yml` | Schedule + runner config | Edit cron times if needed |
-| `history.json` | Auto-created — tracks used questions | Never edit manually |
-| `todays_questions.json` | Auto-created — quiz saves, solution reads | Never edit manually |
-| `sent_photos.json` | Auto-created — tracks sent college photos | Never edit manually |
-| `pdfs/*.txt` | Optional PYQ text for better questions | Add your own extracted text |
+| `send_polls.py` | Main automation — all 5 modes + PW API | Edit groups, batch ID, prompts |
+| `generate_motivation.py` | Generates the daily motivation image | Usually no |
+| `Montserrat-Bold.ttf` | Motivation image font | No |
+| `Montserrat-Regular.ttf` | Motivation image font | No |
+| `Montserrat-Italic.ttf` | Motivation image font | No |
+| `.github/workflows/daily.yml` | Schedule + GitHub Actions runner | Edit cron times if needed |
+| `history.json` | Tracks previously used questions | Auto-managed |
+| `todays_questions.json` | Stores today's quiz questions | Auto-managed |
+| `sent_photos.json` | Tracks sent college photos | Auto-managed |
+| `motivation_images/` | Generated motivation images | Auto-managed |
+| `pdfs/*.txt` | Optional PYQ context for question generation | Add your own extracted text |
 
 ---
 
@@ -278,4 +366,4 @@ Everything is free:
 
 ---
 
-*Built for Lakshya JEE 2027 mentorship program. Runs 5 automated workflows daily, 5 days a week.*
+*Built for the Lakshya JEE 2027 mentorship program. Runs five automated content modes on a daily schedule using GitHub Actions.*

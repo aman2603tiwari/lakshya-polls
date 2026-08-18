@@ -2,7 +2,7 @@
 send_polls.py  —  Lakshya JEE 2027 Automation
 ===============================================
 Modes:
-  --mode=motivation  (8 AM daily)        → motivation quote text → all groups
+  --mode=motivation  (8 AM daily)        → AI-generated motivation image → all groups
   --mode=quiz        (1 PM Mon-Fri)      → intro + 5 PYQ polls → all groups
   --mode=checkin     (5 PM daily)        → daily checkin / Saturday weekly review
   --mode=solution    (10 PM Mon-Fri)     → 5 solution messages → all groups
@@ -21,6 +21,7 @@ from email.mime.text import MIMEText
 
 import requests
 from groq import Groq
+from generate_motivation import generate_today
 
 # ─── SECRETS ──────────────────────────────────────────────────────────────────
 
@@ -288,6 +289,7 @@ def upload_image(image_path: str) -> str:
 
 
 def send_image_message(group, image_id, file_size_kb):
+    """Send an uploaded image to a PW group. Returns True on success."""
     payload = {
         "batchId":   BATCH_ID,
         "groupId":   group["groupId"],
@@ -304,11 +306,20 @@ def send_image_message(group, image_id, file_size_kb):
         )
         if r.status_code in (200, 201):
             log(f"  ✅ Image sent → {group['name']}")
+            time.sleep(1)
+            return True
+        elif r.status_code == 401:
+            log(f"  ❌ Token expired → {group['name']} — update PW_TOKEN in GitHub Secrets!")
+            time.sleep(1)
+            return False
         else:
             log(f"  ⚠️  Image failed → {group['name']}: {r.status_code} {r.text[:150]}")
+            time.sleep(1)
+            return False
     except Exception as e:
         log(f"  ❌ Image error → {group['name']}: {e}")
-    time.sleep(1)
+        time.sleep(1)
+        return False
 
 
 # ─── PW: SEND POLL (TWO-STEP) ─────────────────────────────────────────────────
@@ -491,53 +502,29 @@ def download_drive_photo(service, file_id, dest_path):
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 
-# ─── GROQ: PYQ SAMPLING ───────────────────────────────────────────────────────
-
-def sample_pyq_text(subject, chars=700):
-    """
-    Return a small deterministic PYQ sample for the given subject.
-
-    Keep this deliberately small because Groq's free/on-demand TPM limit
-    applies to the complete request.
-    """
+def sample_pyq_text(subject, chars=600):
     fname = PDF_DIR / f"{subject.lower()}_pyq.txt"
-
     if not fname.exists():
         return f"[No PYQ file for {subject} — use general JEE knowledge]"
-
-    text = fname.read_text(encoding="utf-8", errors="ignore")
-
+    text  = fname.read_text(encoding="utf-8", errors="ignore")
     if len(text) <= chars:
         return text
-
-    # Deterministic but different sample for each subject/day.
-    seed = date.today().toordinal() * 100 + hash(subject) % 100
-    rng = random.Random(seed)
-
-    start = rng.randint(0, len(text) - chars)
-    chunk = text[start:start + chars]
-
-    # Try not to start in the middle of a question.
-    nl = chunk.find("\n")
-
+    seed  = date.today().toordinal() * 100 + hash(subject) % 100
+    random.seed(seed)
+    start = random.randint(0, len(text) - chars)
+    chunk = text[start: start + chars]
+    nl    = chunk.find("\n")
     return chunk[nl:].strip() if nl > 0 else chunk.strip()
 
 
 # ─── GROQ: GENERATE QUESTIONS ─────────────────────────────────────────────────
 
 def generate_questions(subjects):
-    """
-    Generate exactly 5 JEE PYQ-style questions using Groq Structured Outputs.
-
-    GPT-OSS 20B supports strict JSON schema, so the response is guaranteed
-    to follow the expected structure.
-    """
-
+    """Generate exactly 5 JEE PYQ-style questions using strict JSON schema."""
     subject_list = "\n".join(
         f"Q{i+1}: {s}" for i, s in enumerate(subjects)
     )
 
-    # Keep context small to stay safely within Groq TPM limits.
     pyq_samples = {
         s: sample_pyq_text(s, chars=600)
         for s in set(subjects)
@@ -548,8 +535,7 @@ def generate_questions(subjects):
         for s, t in pyq_samples.items()
     )
 
-    prompt = f"""
-You are an expert JEE Main and JEE Advanced question setter.
+    prompt = f"""You are an expert JEE Main and JEE Advanced question setter.
 
 Generate exactly 5 realistic JEE PYQ-style multiple-choice questions.
 
@@ -559,28 +545,22 @@ SUBJECT ASSIGNMENT:
 PYQ MATERIAL:
 {context_block}
 
-Use the PYQ material only for style and difficulty.
-Do NOT copy it verbatim.
+Use the PYQ material only for style and difficulty. Do NOT copy it verbatim.
 
 RULES:
-
-1. Generate exactly 5 questions.
-2. Follow the subject assignment exactly.
-3. Each question must have an exam year/session tag.
-4. Each question must have exactly 4 options.
-5. correct must be an integer from 1 to 4.
-6. Give a concise 2-4 step solution.
-7. Questions must be solvable using the standard JEE syllabus.
-8. Do NOT use images, graphs, diagrams or questions referring to them.
-9. Do NOT use LaTeX backslashes.
-10. Use plain text mathematics:
-    x^2
-    sqrt(x)
-    alpha
-    sin(theta)
-11. Avoid ambiguous or incomplete questions.
-12. Keep the question and solution concise.
-13. Return only the requested structured data.
+- Generate exactly 5 questions.
+- Follow the subject assignment exactly.
+- Each question must have an exam year/session tag.
+- Each question must have exactly 4 meaningful options.
+- correct must be an integer from 1 to 4.
+- Give a concise 2-4 step solution.
+- Questions must be solvable using the standard JEE syllabus.
+- Do NOT use images, graphs, diagrams, or questions referring to them.
+- Do NOT use LaTeX backslashes.
+- Use plain text mathematics: x^2, sqrt(x), alpha, sin(theta).
+- Avoid ambiguous or incomplete questions.
+- Keep questions and solutions concise.
+- Return only the requested structured data.
 """
 
     try:
@@ -588,27 +568,15 @@ RULES:
 
         resp = groq_client.chat.completions.create(
             model="openai/gpt-oss-20b",
-
             messages=[
                 {
                     "role": "system",
-                    "content": (
-                        "You are a precise JEE question-generation system. "
-                        "Follow the provided output schema exactly."
-                    )
+                    "content": "You are a precise JEE question-generation system. Follow the provided output schema exactly."
                 },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
+                {"role": "user", "content": prompt}
             ],
-
             temperature=0.2,
-
-            # Keep this reasonably large because GPT-OSS can use
-            # reasoning tokens internally.
             max_tokens=3000,
-
             response_format={
                 "type": "json_schema",
                 "json_schema": {
@@ -616,67 +584,38 @@ RULES:
                     "strict": True,
                     "schema": {
                         "type": "object",
-
                         "properties": {
                             "questions": {
                                 "type": "array",
                                 "minItems": 5,
                                 "maxItems": 5,
-
                                 "items": {
                                     "type": "object",
-
                                     "properties": {
-                                        "subject": {
-                                            "type": "string"
-                                        },
-
-                                        "year_tag": {
-                                            "type": "string"
-                                        },
-
-                                        "question": {
-                                            "type": "string"
-                                        },
-
+                                        "subject": {"type": "string"},
+                                        "year_tag": {"type": "string"},
+                                        "question": {"type": "string"},
                                         "options": {
                                             "type": "array",
                                             "minItems": 4,
                                             "maxItems": 4,
-
-                                            "items": {
-                                                "type": "string"
-                                            }
+                                            "items": {"type": "string"}
                                         },
-
                                         "correct": {
                                             "type": "integer",
                                             "enum": [1, 2, 3, 4]
                                         },
-
-                                        "solution": {
-                                            "type": "string"
-                                        }
+                                        "solution": {"type": "string"}
                                     },
-
                                     "required": [
-                                        "subject",
-                                        "year_tag",
-                                        "question",
-                                        "options",
-                                        "correct",
-                                        "solution"
+                                        "subject", "year_tag", "question",
+                                        "options", "correct", "solution"
                                     ],
-
                                     "additionalProperties": False
                                 }
                             }
                         },
-
-                        "required": [
-                            "questions"
-                        ],
-
+                        "required": ["questions"],
                         "additionalProperties": False
                     }
                 }
@@ -684,28 +623,16 @@ RULES:
         )
 
         raw = resp.choices[0].message.content.strip()
-
         log(f"[DEBUG] Groq raw (first 300): {raw[:300]}")
-
-        # Because the schema returns:
-        #
-        # {
-        #   "questions": [...]
-        # }
-        #
-        # your existing parser already supports this format.
         questions = extract_questions_from_groq(raw)
-
-        log(
-            f"[INFO] Groq generated "
-            f"{len(questions)} valid question(s)"
-        )
-
+        log(f"[INFO] Groq generated {len(questions)} valid question(s)")
         return questions
 
     except Exception as e:
         log(f"[WARN] Groq structured generation failed: {e}")
         return []
+
+
 # ─── GROQ: INTRO MESSAGE ──────────────────────────────────────────────────────
 
 def generate_intro_message(subjects):
@@ -725,7 +652,7 @@ Rules:
 
 Return ONLY the message text."""
     resp = groq_client.chat.completions.create(
-        model="openai/gpt-oss-20b",
+        model="qwen/qwen3.6-27b",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.9,
         max_tokens=150,
@@ -760,7 +687,7 @@ Return ONLY JSON: {"quote": "quote text"}"""
     ]
     cat = categories[date.today().toordinal() % len(categories)]
     resp = groq_client.chat.completions.create(
-        model="openai/gpt-oss-20b",
+        model="qwen/qwen3.6-27b",
         messages=[
             {"role": "system", "content": system},
             {"role": "user",   "content": f"Category: {cat}\nSeed: {date.today().toordinal()}"},
@@ -792,7 +719,7 @@ Rules:
 
 Return ONLY the caption text."""
     resp = groq_client.chat.completions.create(
-        model="openai/gpt-oss-20b",
+        model="qwen/qwen3.6-27b",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.92,
         max_tokens=100,
@@ -819,7 +746,7 @@ Rules:
 
 Return ONLY the message text."""
     resp = groq_client.chat.completions.create(
-        model="openai/gpt-oss-20b",
+        model="qwen/qwen3.6-27b",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.92,
         max_tokens=200,
@@ -845,7 +772,7 @@ Rules:
 
 Return ONLY the message text."""
     resp = groq_client.chat.completions.create(
-        model="openai/gpt-oss-20b",
+        model="qwen/qwen3.6-27b",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.92,
         max_tokens=250,
@@ -856,76 +783,88 @@ Return ONLY the message text."""
 # ─── MODE: MOTIVATION (8 AM daily) ───────────────────────────────────────────
 
 def run_motivation():
-    log("=== MODE: MOTIVATION (8 AM) ===")
+    log("=== MODE: MOTIVATION IMAGE (8 AM) ===")
 
-    # Try generating a quote, with fallback if PW blocks it
-    quote = None
-    for attempt in range(3):
-        try:
-            q = generate_motivation_quote()
-            # Pre-screen: avoid words PW commonly blocks
-            blocked_words = ["3 AM", "3AM", "doubt", "quit", "fail", "die", "kill", "blood"]
-            if any(w.lower() in q.lower() for w in blocked_words):
-                log(f"[WARN] Quote contains potentially blocked word, retrying... (attempt {attempt+1})")
-                time.sleep(1)
-                continue
-            quote = q
-            break
-        except Exception as e:
-            log(f"[WARN] Quote generation failed attempt {attempt+1}: {e}")
-            time.sleep(1)
+    motivation_path = None
 
-    if not quote:
-        quote = "Today is another chance to get closer to your IIT dream. Stay focused, stay consistent. You've got this! 💪"
-        log("[WARN] Using fallback quote")
+    try:
+        log("Generating today's motivation image...")
+        motivation_path = generate_today(save=True)
 
-    log(f"Quote: {quote[:80]}...")
-    msg = f"🌅 Good Morning, Lakshya JEE 2027!\n\n{quote}\n\n— Keep going. Your IIT is waiting. 💪"
+        if not motivation_path:
+            raise Exception("Motivation generator returned no image path.")
 
-    success = 0
-    fail    = 0
-    token_expired = False
+        motivation_path = Path(motivation_path)
 
-    for group in GROUPS:
-        log(f"Sending to {group['name']}...")
-        ok = send_message(group, msg)
-        if ok:
-            success += 1
-        else:
-            # Check if it's a token issue
-            fail += 1
-            # Try fallback if prohibited word
-            fallback = "🌅 Good Morning, Lakshya JEE 2027!\n\nStart strong today. Every problem you solve is one step closer to your IIT rank. Keep going! 💪"
-            ok2 = send_message(group, fallback)
-            if ok2:
+        if not motivation_path.exists():
+            raise FileNotFoundError(
+                f"Generated motivation image not found: {motivation_path}"
+            )
+
+        file_size_kb = motivation_path.stat().st_size // 1024
+        log(f"✅ Motivation image generated → {motivation_path} ({file_size_kb} KB)")
+
+        log("Uploading motivation image to PW...")
+        image_id = upload_image(str(motivation_path))
+
+        if not image_id:
+            raise Exception("PW image upload returned no image ID.")
+
+        log(f"✅ Motivation image uploaded → imageId: {image_id}")
+
+        success = 0
+        fail = 0
+
+        for group in GROUPS:
+            log(f"Sending motivation image → {group['name']}...")
+            ok = send_image_message(group, image_id, file_size_kb)
+            if ok:
                 success += 1
-                fail -= 1
+            else:
+                fail += 1
 
-    log(f"Motivation results: {success}/5 sent, {fail}/5 failed")
+        log(f"Motivation image results: {success}/5 sent, {fail}/5 failed")
 
-    if success == 0:
-        msg_alert = (
-            f"❌ Morning Motivation FAILED — 0/5 groups received the message.\n"
-            f"Most likely cause: PW_TOKEN expired.\n\n"
-            f"Fix: pw.live → group → create poll → copy Authorization header → "
-            f"GitHub Secrets → PW_TOKEN → Update\n\n"
-            f"Quote attempted: {quote}"
+        if success == 0:
+            msg = (
+                "❌ Morning Motivation Image FAILED\n\n"
+                "Image was generated but could not be sent to any group.\n"
+                f"Image: {motivation_path.name}\n"
+                "Most likely cause: PW_TOKEN expired."
+            )
+            log(msg)
+            send_alert("❌ Morning Motivation Image FAILED", msg)
+            sys.exit(1)
+
+        elif fail > 0:
+            send_alert(
+                f"⚠️ Morning Motivation Image — {fail} groups failed",
+                f"Sent: {success}/5\nFailed: {fail}/5\nImage: {motivation_path.name}\nDate: {date.today()}"
+            )
+        else:
+            log("✅ Motivation image sent to all 5 groups.")
+            send_alert(
+                "✅ Morning Motivation Image Sent",
+                f"Motivation image sent to all 5 groups.\nImage: {motivation_path.name}\nDate: {date.today()}"
+            )
+
+    except Exception as e:
+        log(f"❌ Motivation image generation/sending failed: {e}")
+        send_alert(
+            "❌ Morning Motivation Image FAILED",
+            f"Error: {e}\n\nDate: {date.today()}"
         )
-        log(f"❌ {msg_alert}")
-        send_alert("❌ Morning Motivation FAILED — Token likely expired", msg_alert)
         sys.exit(1)
-    elif fail > 0:
-        log("⚠️  Motivation sent to some groups.")
-        send_alert(
-            f"⚠️ Morning Motivation — {fail} groups failed",
-            f"Sent: {success}/5\nFailed: {fail}/5\nDate: {date.today()}\nQuote: {quote}"
-        )
-    else:
-        log("✅ Motivation mode complete.")
-        send_alert(
-            "✅ Morning Motivation Sent",
-            f"Sent to all 5 groups.\nDate: {date.today()}\nQuote: {quote}"
-        )
+
+    finally:
+        if motivation_path:
+            try:
+                motivation_path = Path(motivation_path)
+                if motivation_path.exists():
+                    motivation_path.unlink()
+                    log(f"🗑️ Removed temporary motivation image: {motivation_path.name}")
+            except Exception as e:
+                log(f"[WARN] Could not remove motivation image: {e}")
 
 
 # ─── MODE: QUIZ (1 PM Mon-Fri) ───────────────────────────────────────────────
@@ -942,7 +881,7 @@ def run_quiz():
     questions = []
     attempts  = 0
 
-    while len(questions) < 5 and attempts < 8:
+    while len(questions) < 5 and attempts < 3:
         attempts += 1
         needed = 5 - len(questions)
         log(f"Attempt {attempts}: need {needed} more question(s)...")

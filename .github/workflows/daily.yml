@@ -81,7 +81,7 @@ jobs:
         run: |
           echo "Running in mode: $MODE"
           ls -la todays_questions.json 2>/dev/null || echo "No questions file yet"
-          python send_polls.py --mode=$MODE || true
+          python send_polls.py --mode=$MODE
 
       # ── Save today's questions to cache (quiz mode) ──────────────────────
       - name: Save questions to cache
