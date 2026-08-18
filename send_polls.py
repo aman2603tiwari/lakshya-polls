@@ -546,7 +546,7 @@ Return ONLY a JSON array of exactly 5 objects, no markdown, no backticks:
 
     try:
         resp = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="qwen/qwen3.6-27b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
             max_tokens=3000,
