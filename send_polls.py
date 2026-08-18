@@ -491,74 +491,221 @@ def download_drive_photo(service, file_id, dest_path):
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 
-def sample_pyq_text(subject, chars=3000):
+# ─── GROQ: PYQ SAMPLING ───────────────────────────────────────────────────────
+
+def sample_pyq_text(subject, chars=700):
+    """
+    Return a small deterministic PYQ sample for the given subject.
+
+    Keep this deliberately small because Groq's free/on-demand TPM limit
+    applies to the complete request.
+    """
     fname = PDF_DIR / f"{subject.lower()}_pyq.txt"
+
     if not fname.exists():
         return f"[No PYQ file for {subject} — use general JEE knowledge]"
-    text  = fname.read_text(encoding="utf-8", errors="ignore")
+
+    text = fname.read_text(encoding="utf-8", errors="ignore")
+
     if len(text) <= chars:
         return text
-    seed  = date.today().toordinal() * 100 + hash(subject) % 100
-    random.seed(seed)
-    start = random.randint(0, len(text) - chars)
-    chunk = text[start: start + chars]
-    nl    = chunk.find("\n")
+
+    # Deterministic but different sample for each subject/day.
+    seed = date.today().toordinal() * 100 + hash(subject) % 100
+    rng = random.Random(seed)
+
+    start = rng.randint(0, len(text) - chars)
+    chunk = text[start:start + chars]
+
+    # Try not to start in the middle of a question.
+    nl = chunk.find("\n")
+
     return chunk[nl:].strip() if nl > 0 else chunk.strip()
 
 
 # ─── GROQ: GENERATE QUESTIONS ─────────────────────────────────────────────────
 
 def generate_questions(subjects):
-    subject_list  = "\n".join(f"Q{i+1}: {s}" for i, s in enumerate(subjects))
-    pyq_samples   = {s: sample_pyq_text(s) for s in set(subjects)}
-    context_block = "\n\n".join(
-        f"=== {s} PYQ SAMPLE ===\n{t}" for s, t in pyq_samples.items()
+    """
+    Generate exactly 5 JEE PYQ-style questions.
+
+    Uses a deliberately small prompt to stay safely below Groq's
+    free/on-demand TPM limit.
+
+    If the first request hits a token-limit error, retry once with
+    an even smaller PYQ context and output budget.
+    """
+
+    subject_list = "\n".join(
+        f"Q{i+1}: {s}" for i, s in enumerate(subjects)
     )
-    prompt = f"""You are a JEE question expert. Generate exactly 5 JEE PYQ questions.
+
+    # Only one small sample per DISTINCT subject.
+    pyq_samples = {
+        s: sample_pyq_text(s, chars=700)
+        for s in set(subjects)
+    }
+
+    context_block = "\n\n".join(
+        f"=== {s} PYQ SAMPLE ===\n{t}"
+        for s, t in pyq_samples.items()
+    )
+
+    prompt = f"""You are an expert JEE Main/Advanced question setter.
+
+Generate exactly 5 REALISTIC JEE PYQ-STYLE multiple-choice questions.
 
 Subject assignment:
 {subject_list}
+
+Use the PYQ samples only as style/difficulty guidance.
+Do NOT copy the samples verbatim.
 
 PYQ MATERIAL:
 {context_block}
 
 RULES:
-- Each question MUST include exam year and session tag e.g. [JEE Main 2022 June S1] or [JEE Adv 2019 P2]
-- 4 options per question (A B C D) — specific values, not placeholders
-- correct is 1-4 (1=A, 2=B, 3=C, 4=D)
-- solution: 3-5 step working in plain text
-- CRITICAL: Do NOT use LaTeX backslashes like \\alpha \\frac \\theta \\sqrt
-- DO NOT USE QUESTIONS WHERE IMAGES ARE REFERRED OR PRESENT
-- Write math in plain text: "alpha" not "\\alpha", "x^2" not "x squared"
-- Backslashes break JSON parsing — plain text only
+- Exactly 5 questions.
+- Follow the subject assignment above.
+- Each question must have an exam year/session tag.
+- 4 meaningful options: A, B, C, D.
+- "correct" must be 1, 2, 3, or 4.
+- Give a concise 3-5 step solution.
+- Questions must be solvable using standard JEE syllabus.
+- Do NOT use questions requiring an image, graph, diagram, or figure.
+- Do NOT refer to an image or missing information.
+- Do NOT use LaTeX backslashes.
+- Write math as plain text, e.g. x^2, sqrt(x), alpha.
+- Keep questions and solutions concise.
+- Do not invent impossible or ambiguous options.
 
-Return ONLY a JSON array of exactly 5 objects, no markdown, no backticks:
+Return ONLY valid JSON.
+
+Format:
 [
   {{
     "subject": "Physics",
     "year_tag": "[JEE Main 2023 Jan S2]",
-    "question": "[JEE Main 2023 Jan S2] full question text here",
+    "question": "[JEE Main 2023 Jan S2] Question text",
     "options": ["A text", "B text", "C text", "D text"],
     "correct": 2,
-    "solution": "Step 1: ...\\nStep 2: ...\\nAnswer: B"
+    "solution": "Step 1: ... Step 2: ... Step 3: ... Answer: B"
   }}
-]"""
+]
+"""
 
-    try:
-        resp = groq_client.chat.completions.create(
-            model="qwen/qwen3.6-27b",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=3000,
-            response_format={"type": "json_object"},
-        )
-        raw = resp.choices[0].message.content.strip()
-        log(f"[DEBUG] Groq raw (first 150): {raw[:150]}")
-        return extract_questions_from_groq(raw)
-    except Exception as e:
-        log(f"[WARN] Groq call failed: {e}")
-        return []
+    # First attempt: normal compact request.
+    attempts = [
+        {
+            "name": "normal",
+            "prompt": prompt,
+            "max_tokens": 2200,
+        },
+        {
+            # Emergency fallback if request is still too large.
+            "name": "minimal",
+            "prompt": f"""Generate exactly 5 concise JEE MCQs.
 
+Subjects:
+{subject_list}
+
+Rules:
+- Match each question to the assigned subject.
+- Give a realistic JEE Main/Advanced year/session tag.
+- 4 options.
+- correct = 1, 2, 3, or 4.
+- Give a short 2-3 step solution.
+- No images, graphs, diagrams, or references to them.
+- No LaTeX backslashes.
+- Plain text math only.
+- Return ONLY a JSON array.
+
+Format:
+[
+  {{
+    "subject": "Physics",
+    "year_tag": "[JEE Main 2023 Jan S2]",
+    "question": "Question",
+    "options": ["A", "B", "C", "D"],
+    "correct": 2,
+    "solution": "Step 1: ... Step 2: ... Answer: B"
+  }}
+]
+""",
+            "max_tokens": 1800,
+        },
+    ]
+
+    for attempt_no, config in enumerate(attempts, 1):
+
+        try:
+            log(
+                f"[INFO] Groq question generation attempt "
+                f"{attempt_no}/{len(attempts)} ({config['name']})"
+            )
+
+            resp = groq_client.chat.completions.create(
+                model="openai/gpt-oss-20b",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": config["prompt"]
+                    }
+                ],
+                temperature=0.3,
+                max_tokens=config["max_tokens"],
+                response_format={"type": "json_object"},
+            )
+
+            raw = resp.choices[0].message.content.strip()
+
+            log(f"[DEBUG] Groq raw (first 150): {raw[:150]}")
+
+            questions = extract_questions_from_groq(raw)
+
+            if questions:
+                log(
+                    f"[INFO] Groq generated "
+                    f"{len(questions)} valid question(s)"
+                )
+
+            return questions
+
+        except Exception as e:
+            error_text = str(e)
+
+            log(
+                f"[WARN] Groq call failed on "
+                f"{config['name']} attempt: {error_text}"
+            )
+
+            # A 413 token-limit error is deterministic.
+            # Do NOT retry the exact same oversized request.
+            if (
+                "413" in error_text
+                or "tokens per minute" in error_text.lower()
+                or "request too large" in error_text.lower()
+                or "rate_limit_exceeded" in error_text.lower()
+            ):
+                if attempt_no < len(attempts):
+                    log(
+                        "[WARN] Token-limit error detected. "
+                        "Retrying once with a smaller prompt."
+                    )
+                    time.sleep(1)
+                    continue
+
+                log(
+                    "[ERROR] Even the minimal Groq request was "
+                    "rejected because of token limits."
+                )
+                return []
+
+            # Other API errors should also not cause repeated
+            # identical calls inside generate_questions().
+            return []
+
+    return []
 
 # ─── GROQ: INTRO MESSAGE ──────────────────────────────────────────────────────
 
@@ -579,7 +726,7 @@ Rules:
 
 Return ONLY the message text."""
     resp = groq_client.chat.completions.create(
-        model="qwen/qwen3.6-27b",
+        model="openai/gpt-oss-20b",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.9,
         max_tokens=150,
@@ -614,7 +761,7 @@ Return ONLY JSON: {"quote": "quote text"}"""
     ]
     cat = categories[date.today().toordinal() % len(categories)]
     resp = groq_client.chat.completions.create(
-        model="qwen/qwen3.6-27b",
+        model="openai/gpt-oss-20b",
         messages=[
             {"role": "system", "content": system},
             {"role": "user",   "content": f"Category: {cat}\nSeed: {date.today().toordinal()}"},
@@ -646,7 +793,7 @@ Rules:
 
 Return ONLY the caption text."""
     resp = groq_client.chat.completions.create(
-        model="qwen/qwen3.6-27b",
+        model="openai/gpt-oss-20b",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.92,
         max_tokens=100,
@@ -673,7 +820,7 @@ Rules:
 
 Return ONLY the message text."""
     resp = groq_client.chat.completions.create(
-        model="qwen/qwen3.6-27b",
+        model="openai/gpt-oss-20b",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.92,
         max_tokens=200,
@@ -699,7 +846,7 @@ Rules:
 
 Return ONLY the message text."""
     resp = groq_client.chat.completions.create(
-        model="qwen/qwen3.6-27b",
+        model="openai/gpt-oss-20b",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.92,
         max_tokens=250,
