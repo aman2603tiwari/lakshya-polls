@@ -119,7 +119,7 @@ Add all of these:
 
 | Secret Name | Value | Notes |
 |---|---|---|
-| `PW_TOKEN` | `Bearer eyJ0eXAiOiJKV1Q...` | Full value including "Bearer " |
+| `PW_TOKEN` | `Bearer eyJ0eXAiOiJKV1Q...` | Full value Excluding "Bearer " |
 | `GROQ_API_KEY` | `gsk_...` | From console.groq.com |
 | `ALERT_EMAIL` | `your@gmail.com` | Where email alerts go |
 | `GMAIL_APP_PWD` | `abcdabcdabcdabcd` | 16 chars, no spaces |
