@@ -1,0 +1,34 @@
+name: PW Student Message Monitor
+on:
+  schedule:
+    - cron: '30 4 * * *'
+    - cron: '30 8 * * *'
+    - cron: '30 11 * * *'
+    - cron: '30 17 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: pip install requests
+      - name: Check PW messages
+        env:
+          PW_TOKEN: ${{ secrets.PW_TOKEN }}
+          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
+          GMAIL_APP_PWD: ${{ secrets.GMAIL_APP_PWD }}
+        run: python check_messages.py
+      - name: Save monitor state
+        if: success()
+        run: |
+          if git diff --quiet -- message_monitor_state.json; then exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add message_monitor_state.json
+          git commit -m 'chore: update message monitor state'
+          git push
