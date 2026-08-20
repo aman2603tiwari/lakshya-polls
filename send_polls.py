@@ -508,13 +508,20 @@ def sample_pyq_text(subject, chars=3000):
 
 # ─── GROQ: GENERATE QUESTIONS ─────────────────────────────────────────────────
 
+# ─── GROQ: GENERATE QUESTIONS ─────────────────────────────────────────────────
+
 def generate_questions(subjects):
-    subject_list  = "\n".join(f"Q{i+1}: {s}" for i, s in enumerate(subjects))
-    pyq_samples   = {s: sample_pyq_text(s) for s in set(subjects)}
+    subject_list = "\n".join(f"Q{i+1}: {s}" for i, s in enumerate(subjects))
+
+    # Keep the PYQ context small enough for Groq's 8000 TPM limit.
+    pyq_samples = {s: sample_pyq_text(s, chars=1500) for s in set(subjects)}
+
     context_block = "\n\n".join(
-        f"=== {s} PYQ SAMPLE ===\n{t}" for s, t in pyq_samples.items()
+        f"=== {s} PYQ SAMPLE ===\n{t}"
+        for s, t in pyq_samples.items()
     )
-    prompt = f"""You are a JEE question expert. Generate exactly 5 JEE PYQ questions.
+
+    prompt = f"""You are a JEE question expert. Generate exactly 5 JEE PYQ-style questions.
 
 Subject assignment:
 {subject_list}
@@ -523,16 +530,19 @@ PYQ MATERIAL:
 {context_block}
 
 RULES:
-- Each question MUST include exam year and session tag e.g. [JEE Main 2022 June S1] or [JEE Adv 2019 P2]
-- 4 options per question (A B C D) — specific values, not placeholders
-- correct is 1-4 (1=A, 2=B, 3=C, 4=D)
-- solution: 3-5 step working in plain text
-- CRITICAL: Do NOT use LaTeX backslashes like \\alpha \\frac \\theta \\sqrt
-- DO NOT USE QUESTIONS WHERE IMAGES ARE REFERRED OR PRESENT
-- Write math in plain text: "alpha" not "\\alpha", "x^2" not "x squared"
-- Backslashes break JSON parsing — plain text only
+- Each question MUST include exam year and session tag.
+- 4 options per question (A B C D).
+- correct is 1-4 (1=A, 2=B, 3=C, 4=D).
+- solution: concise 2-4 step working in plain text.
+- CRITICAL: Do NOT use LaTeX backslashes.
+- DO NOT USE QUESTIONS WHERE IMAGES ARE REFERRED OR PRESENT.
+- Write math in plain text: alpha, x^2, sqrt(x), etc.
+- Questions must be complete and unambiguous.
+- Do not copy the PYQ sample verbatim. Use it only as reference for style/topic.
+- Follow the requested subject assignment.
 
-Return ONLY a JSON array of exactly 5 objects, no markdown, no backticks:
+Return ONLY a JSON array containing exactly 5 objects:
+
 [
   {{
     "subject": "Physics",
@@ -545,21 +555,38 @@ Return ONLY a JSON array of exactly 5 objects, no markdown, no backticks:
 ]"""
 
     try:
+        log("[INFO] Calling Groq for 5 questions...")
+
         resp = groq_client.chat.completions.create(
             model="openai/gpt-oss-20b",
-            messages=[{"role": "user", "content": prompt}],
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a precise JEE question-generation system. "
+                        "Return only the requested JSON data."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ],
             temperature=0.3,
-            max_tokens=3000,
+            max_tokens=2500,
             response_format={"type": "json_object"},
             include_reasoning=False,
         )
+
         raw = resp.choices[0].message.content.strip()
+
         log(f"[DEBUG] Groq raw (first 150): {raw[:150]}")
+
         return extract_questions_from_groq(raw)
+
     except Exception as e:
         log(f"[WARN] Groq call failed: {e}")
         return []
-
 
 # ─── GROQ: INTRO MESSAGE ──────────────────────────────────────────────────────
 
