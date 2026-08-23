@@ -24,9 +24,16 @@ from groq import Groq
 
 # ─── SECRETS ──────────────────────────────────────────────────────────────────
 
-# Accept either a raw PW token or a value copied as "Bearer <token>".
-# The API header below always gets exactly one "Bearer" prefix.
+# Accept either:
+#   abc123...
+# or:
+#   Bearer abc123...
+#
+# Internally we always store ONLY the raw token.
+# JSON_HEADERS adds exactly one "Bearer " prefix.
+
 RAW_PW_TOKEN = os.environ["PW_TOKEN"].strip()
+
 if RAW_PW_TOKEN.lower().startswith("bearer "):
     PW_TOKEN = RAW_PW_TOKEN[7:].strip()
     PW_TOKEN_FORMAT = "Bearer <token> (normalized)"
@@ -35,7 +42,9 @@ else:
     PW_TOKEN_FORMAT = "raw token"
 
 if not PW_TOKEN:
-    raise RuntimeError("PW_TOKEN is empty. Update the PW_TOKEN GitHub Secret.")
+    raise RuntimeError(
+        "PW_TOKEN is empty. Update the PW_TOKEN GitHub Secret."
+    )
 
 GROQ_API_KEY     = os.environ["GROQ_API_KEY"]
 ALERT_EMAIL      = os.environ.get("ALERT_EMAIL", "")
@@ -43,24 +52,12 @@ GMAIL_APP_PWD    = os.environ.get("GMAIL_APP_PWD", "")
 GDRIVE_SA_JSON   = os.environ.get("GDRIVE_SA_JSON", "")
 GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "")
 
-# ─── PW API CONFIG ────────────────────────────────────────────────────────────
+# ─── PW HEADERS ───────────────────────────────────────────────────────────────
 
-BASE_URL  = "https://api.penpencil.co"
-CLIENT_ID = "5eb393ee95fab7468a79d189"
-BATCH_ID  = "6779345c20fa0756e4a7fd08"
-
-HEADERS = {
+JSON_HEADERS = {
     "Authorization": f"Bearer {PW_TOKEN}",
-    "client-id":     CLIENT_ID,
-    "client-type":   "WEB",
-    "origin":        "https://www.pw.live",
-    "referer":       "https://www.pw.live/",
-    "x-sdk-version": "0.0.28",
-    "randomid":      "2f81cbed-4d22-4f57-994e-3f78dbf6e309",
+    "Content-Type": "application/json",
 }
-
-JSON_HEADERS = {**HEADERS, "Content-Type": "application/json"}
-
 # ─── GROUPS ───────────────────────────────────────────────────────────────────
 
 GROUPS = [
@@ -237,42 +234,92 @@ def extract_questions_from_groq(raw: str) -> list:
 
 
 # ─── PW: SEND TEXT MESSAGE ────────────────────────────────────────────────────
+# ─── PW: SEND TEXT MESSAGE ───────────────────────────────────────────────────
 
 def send_message(group, text) -> bool:
-    """Returns True if message sent successfully, False otherwise."""
+    """
+    Send a text message to one PW group.
+
+    Returns:
+        True  -> message sent successfully
+        False -> request failed
+    """
+
     if not text or not text.strip():
+        log(f"  ⚠️ Empty message — {group['name']}")
         return False
+
     payload = {
-        "batchId":   BATCH_ID,
-        "groupId":   group["groupId"],
-        "role":      "Mentor",
-        "type":      "text",
-        "text":      text,
+        "batchId": BATCH_ID,
+        "groupId": group["groupId"],
+        "role": "Mentor",
+        "type": "text",
+        "text": text,
         "filePages": 0,
     }
+
     try:
-        r = requests.post(
-            f"{BASE_URL}/v1/conversation/{group['conversationId']}/chat",
-            headers=JSON_HEADERS, json=payload, timeout=15
+        url = (
+            f"{BASE_URL}/v1/conversation/"
+            f"{group['conversationId']}/chat"
         )
+
+        r = requests.post(
+            url,
+            headers=JSON_HEADERS,
+            json=payload,
+            timeout=15,
+        )
+
+        # ── SUCCESS ───────────────────────────────────────────────────────
+
         if r.status_code in (200, 201):
             log(f"  ✅ Message → {group['name']}")
             time.sleep(1)
             return True
-        elif r.status_code in (401, 403):
-            log(f"  ❌ PW authentication/authorization failed → {group['name']}")
-            log(f"     HTTP {r.status_code}: {r.text[:500]}")
+
+        # ── AUTHENTICATION / AUTHORIZATION ────────────────────────────────
+
+        if r.status_code in (401, 403):
+            log(
+                f"  ❌ PW authentication/authorization failed "
+                f"→ {group['name']}"
+            )
+            log(f"     HTTP {r.status_code}")
+            log(f"     Response: {r.text[:1000]}")
             time.sleep(1)
             return False
-        else:
-            log(f"  ⚠️  Message failed → {group['name']}: {r.status_code} {r.text[:300]}")
-            time.sleep(1)
-            return False
-    except Exception as e:
-        log(f"  ❌ Message error → {group['name']}: {e}")
+
+        # ── OTHER HTTP ERRORS ─────────────────────────────────────────────
+
+        log(
+            f"  ❌ Message failed → {group['name']}: "
+            f"HTTP {r.status_code}"
+        )
+
+        log(f"     Response: {r.text[:1000]}")
+
+        # Don't print the Authorization header/token.
+        log(f"     URL: {url}")
+
         time.sleep(1)
         return False
 
+    # ── NETWORK ERROR ────────────────────────────────────────────────────
+
+    except requests.RequestException as e:
+        log(
+            f"  ❌ Network error → {group['name']}: {e}"
+        )
+        return False
+
+    # ── UNEXPECTED ERROR ─────────────────────────────────────────────────
+
+    except Exception as e:
+        log(
+            f"  ❌ Unexpected error → {group['name']}: {e}"
+        )
+        return False
 
 # ─── PW: UPLOAD + SEND IMAGE ──────────────────────────────────────────────────
 
@@ -1025,48 +1072,112 @@ def run_solution():
 
 # ─── MODE: CHECKIN (5 PM daily) ───────────────────────────────────────────────
 
+# ─── MODE: CHECKIN (5 PM DAILY) ───────────────────────────────────────────────
+
 def run_checkin():
     log("=== MODE: CHECKIN (5 PM) ===")
+
     is_saturday = date.today().weekday() == 5
 
     if is_saturday:
         log("Saturday — generating weekly review...")
-        message       = generate_weekly_review_message()
-        header        = "📊 Weekly Review Time!"
+        message = generate_weekly_review_message()
+        header = "📊 Weekly Review Time!"
         email_subject = "✅ Weekly Review Sent"
     else:
         log("Generating daily checkin...")
-        message       = generate_daily_checkin_message()
-        header        = ""
+        message = generate_daily_checkin_message()
+        header = ""
         email_subject = "✅ Daily Checkin Sent"
 
-    log(f"Message: {message[:80]}...")
+    if not message or not message.strip():
+        log("❌ Generated checkin message is empty.")
+
+        send_alert(
+            "❌ Daily Checkin Generation Failed",
+            f"The generated checkin message was empty.\n"
+            f"Date: {date.today()}"
+        )
+
+        raise RuntimeError(
+            "Daily checkin message generation returned empty text."
+        )
+
+    log(f"Message: {message[:120]}...")
 
     success = 0
-    fail    = 0
+    fail = 0
+
     for group in GROUPS:
         log(f"Sending to {group['name']}...")
+
         ok = send_message(group, message)
+
         if ok:
             success += 1
         else:
             fail += 1
 
-    log(f"Checkin results: {success}/5 sent, {fail}/5 failed")
+    log(
+        f"Checkin results: "
+        f"{success}/{len(GROUPS)} sent, "
+        f"{fail}/{len(GROUPS)} failed"
+    )
+
+    # ── ALL FAILED ───────────────────────────────────────────────────────
 
     if success == 0:
-        log("❌ All groups failed — token likely expired")
-        send_alert("❌ Checkin FAILED — Token likely expired",
-                   f"0/5 groups received checkin.\nFix: refresh PW_TOKEN in GitHub Secrets.\nDate: {date.today()}")
-        sys.exit(1)
-    elif fail > 0:
-        send_alert(f"⚠️ Checkin — {fail} groups failed",
-                   f"Sent: {success}/5\nFailed: {fail}/5\nDate: {date.today()}")
+        log(
+            f"❌ All groups failed — "
+            f"{fail}/{len(GROUPS)} groups failed"
+        )
+
+        send_alert(
+            "❌ Daily Checkin Failed",
+            f"Sent: {success}/{len(GROUPS)}\n"
+            f"Failed: {fail}/{len(GROUPS)}\n"
+            f"Date: {date.today()}\n\n"
+            f"Check the GitHub Actions log for the actual PW API "
+            f"response."
+        )
+
+        raise RuntimeError(
+            "Checkin failed for all groups."
+        )
+
+    # ── PARTIAL SUCCESS ──────────────────────────────────────────────────
+
+    elif success < len(GROUPS):
+        log(
+            f"⚠️ Checkin partially sent — "
+            f"{success}/{len(GROUPS)} successful, "
+            f"{fail}/{len(GROUPS)} failed"
+        )
+
+        send_alert(
+            "⚠️ Daily Checkin Partially Sent",
+            f"Sent: {success}/{len(GROUPS)}\n"
+            f"Failed: {fail}/{len(GROUPS)}\n"
+            f"Date: {date.today()}\n\n"
+            f"Check the GitHub Actions log for failed groups."
+        )
+
+        # Don't silently call this a successful run.
+        raise RuntimeError(
+            f"Checkin partially failed: "
+            f"{success}/{len(GROUPS)} sent."
+        )
+
+    # ── ALL SUCCESS ──────────────────────────────────────────────────────
+
     else:
         log("✅ Checkin mode complete.")
-        send_alert(email_subject, f"Checkin sent to all 5 groups.\nDate: {date.today()}")
 
-
+        send_alert(
+            email_subject,
+            f"Checkin sent to all {len(GROUPS)} groups.\n"
+            f"Date: {date.today()}"
+        )
 # ─── MODE: COLLEGE (3 PM Mon-Wed-Fri) ────────────────────────────────────────
 
 def run_college():
