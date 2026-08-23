@@ -24,7 +24,19 @@ from groq import Groq
 
 # ─── SECRETS ──────────────────────────────────────────────────────────────────
 
-PW_TOKEN         = os.environ["PW_TOKEN"]
+# Accept either a raw PW token or a value copied as "Bearer <token>".
+# The API header below always gets exactly one "Bearer" prefix.
+RAW_PW_TOKEN = os.environ["PW_TOKEN"].strip()
+if RAW_PW_TOKEN.lower().startswith("bearer "):
+    PW_TOKEN = RAW_PW_TOKEN[7:].strip()
+    PW_TOKEN_FORMAT = "Bearer <token> (normalized)"
+else:
+    PW_TOKEN = RAW_PW_TOKEN
+    PW_TOKEN_FORMAT = "raw token"
+
+if not PW_TOKEN:
+    raise RuntimeError("PW_TOKEN is empty. Update the PW_TOKEN GitHub Secret.")
+
 GROQ_API_KEY     = os.environ["GROQ_API_KEY"]
 ALERT_EMAIL      = os.environ.get("ALERT_EMAIL", "")
 GMAIL_APP_PWD    = os.environ.get("GMAIL_APP_PWD", "")
@@ -247,12 +259,13 @@ def send_message(group, text) -> bool:
             log(f"  ✅ Message → {group['name']}")
             time.sleep(1)
             return True
-        elif r.status_code == 401:
-            log(f"  ❌ Token expired → {group['name']} — update PW_TOKEN in GitHub Secrets!")
+        elif r.status_code in (401, 403):
+            log(f"  ❌ PW authentication/authorization failed → {group['name']}")
+            log(f"     HTTP {r.status_code}: {r.text[:500]}")
             time.sleep(1)
             return False
         else:
-            log(f"  ⚠️  Message failed → {group['name']}: {r.status_code} {r.text[:150]}")
+            log(f"  ⚠️  Message failed → {group['name']}: {r.status_code} {r.text[:300]}")
             time.sleep(1)
             return False
     except Exception as e:
@@ -1132,6 +1145,7 @@ def main():
     )
     args = parser.parse_args()
     log(f"Starting in mode: {args.mode.upper()}")
+    log(f"PW_TOKEN received: yes | length={len(PW_TOKEN)} | format={PW_TOKEN_FORMAT}")
 
     try:
         if args.mode == "motivation":
