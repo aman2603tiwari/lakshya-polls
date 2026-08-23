@@ -24,16 +24,9 @@ from groq import Groq
 
 # ─── SECRETS ──────────────────────────────────────────────────────────────────
 
-# Accept either:
-#   abc123...
-# or:
-#   Bearer abc123...
-#
-# Internally we always store ONLY the raw token.
-# JSON_HEADERS adds exactly one "Bearer " prefix.
-
+# Accept either a raw PW token or a value copied as "Bearer <token>".
+# The API header below always gets exactly one "Bearer" prefix.
 RAW_PW_TOKEN = os.environ["PW_TOKEN"].strip()
-
 if RAW_PW_TOKEN.lower().startswith("bearer "):
     PW_TOKEN = RAW_PW_TOKEN[7:].strip()
     PW_TOKEN_FORMAT = "Bearer <token> (normalized)"
@@ -42,9 +35,7 @@ else:
     PW_TOKEN_FORMAT = "raw token"
 
 if not PW_TOKEN:
-    raise RuntimeError(
-        "PW_TOKEN is empty. Update the PW_TOKEN GitHub Secret."
-    )
+    raise RuntimeError("PW_TOKEN is empty. Update the PW_TOKEN GitHub Secret.")
 
 GROQ_API_KEY     = os.environ["GROQ_API_KEY"]
 ALERT_EMAIL      = os.environ.get("ALERT_EMAIL", "")
@@ -52,12 +43,24 @@ GMAIL_APP_PWD    = os.environ.get("GMAIL_APP_PWD", "")
 GDRIVE_SA_JSON   = os.environ.get("GDRIVE_SA_JSON", "")
 GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "")
 
-# ─── PW HEADERS ───────────────────────────────────────────────────────────────
+# ─── PW API CONFIG ────────────────────────────────────────────────────────────
 
-JSON_HEADERS = {
+BASE_URL  = "https://api.penpencil.co"
+CLIENT_ID = "5eb393ee95fab7468a79d189"
+BATCH_ID  = "6779345c20fa0756e4a7fd08"
+
+HEADERS = {
     "Authorization": f"Bearer {PW_TOKEN}",
-    "Content-Type": "application/json",
+    "client-id":     CLIENT_ID,
+    "client-type":   "WEB",
+    "origin":        "https://www.pw.live",
+    "referer":       "https://www.pw.live/",
+    "x-sdk-version": "0.0.28",
+    "randomid":      "2f81cbed-4d22-4f57-994e-3f78dbf6e309",
 }
+
+JSON_HEADERS = {**HEADERS, "Content-Type": "application/json"}
+
 # ─── GROUPS ───────────────────────────────────────────────────────────────────
 
 GROUPS = [
