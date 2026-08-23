@@ -761,7 +761,9 @@ Return ONLY the caption text."""
 # ─── GROQ: DAILY CHECKIN ──────────────────────────────────────────────────────
 
 def generate_daily_checkin_message():
-    prompt = f"""Write a warm engaging message to JEE aspirants at 5 PM asking:
+    prompt = f"""
+Write a warm, engaging message to JEE aspirants at 5 PM asking:
+
 1. How their day is going
 2. Whether they covered today's study target
 
@@ -771,20 +773,44 @@ Seed: {date.today().toordinal()}
 Rules:
 - Sound like a caring mentor
 - Casual and warm tone
-- 1-2 lines max
+- 1-2 lines maximum
 - Use English or Hinglish
-- End with invitation to reply
+- End with an invitation to reply
+- Do not use quotation marks
+- Return ONLY the message text
+"""
 
-Return ONLY the message text."""
-    resp = groq_client.chat.completions.create(
-        model="openai/gpt-oss-20b",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.92,
-        max_tokens=200,
-        include_reasoning=False,
+    try:
+        resp = groq_client.chat.completions.create(
+            model="openai/gpt-oss-20b",
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.8,
+            max_tokens=100,
+        )
+
+        if resp.choices:
+            content = resp.choices[0].message.content
+
+            if content:
+                content = str(content).strip()
+
+                if content:
+                    log(f"Groq checkin generated: {content[:120]}...")
+                    return content
+
+        log("[WARN] Groq returned empty checkin. Using fallback.")
+
+    except Exception as e:
+        log(f"[WARN] Groq checkin generation failed: {e}")
+        log("[WARN] Using fallback checkin message.")
+
+    return (
+        "Hey champ! How’s your day going? "
+        "Aaj ka study target complete hua? "
+        "Reply karke batao! 💪"
     )
-    return resp.choices[0].message.content.strip()
-
 
 # ─── GROQ: WEEKLY REVIEW ──────────────────────────────────────────────────────
 
