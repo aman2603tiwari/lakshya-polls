@@ -2,7 +2,7 @@
 send_polls.py  —  Lakshya JEE 2027 Automation
 ===============================================
 Modes:
-  --mode=motivation  (8 AM daily)        → motivation quote text → all groups
+  --mode=motivation  (8 AM daily)        → AI-generated motivation image → all groups
   --mode=quiz        (1 PM Mon-Fri)      → intro + 5 PYQ polls → all groups
   --mode=checkin     (5 PM daily)        → daily checkin / Saturday weekly review
   --mode=solution    (10 PM Mon-Fri)     → 5 solution messages → all groups
@@ -21,22 +21,11 @@ from email.mime.text import MIMEText
 
 import requests
 from groq import Groq
+from generate_motivation import generate_today
 
 # ─── SECRETS ──────────────────────────────────────────────────────────────────
 
-# Accept either a raw PW token or a value copied as "Bearer <token>".
-# The API header below always gets exactly one "Bearer" prefix.
-RAW_PW_TOKEN = os.environ["PW_TOKEN"].strip()
-if RAW_PW_TOKEN.lower().startswith("bearer "):
-    PW_TOKEN = RAW_PW_TOKEN[7:].strip()
-    PW_TOKEN_FORMAT = "Bearer <token> (normalized)"
-else:
-    PW_TOKEN = RAW_PW_TOKEN
-    PW_TOKEN_FORMAT = "raw token"
-
-if not PW_TOKEN:
-    raise RuntimeError("PW_TOKEN is empty. Update the PW_TOKEN GitHub Secret.")
-
+PW_TOKEN         = os.environ["PW_TOKEN"]
 GROQ_API_KEY     = os.environ["GROQ_API_KEY"]
 ALERT_EMAIL      = os.environ.get("ALERT_EMAIL", "")
 GMAIL_APP_PWD    = os.environ.get("GMAIL_APP_PWD", "")
@@ -59,22 +48,7 @@ HEADERS = {
     "randomid":      "2f81cbed-4d22-4f57-994e-3f78dbf6e309",
 }
 
-import uuid
-
-RANDOM_ID = str(uuid.uuid4())
-
-JSON_HEADERS = {
-    "accept": "*/*",
-    "accept-language": "en-US,en;q=0.9,hi;q=0.8",
-    "authorization": f"Bearer {PW_TOKEN}",
-    "client-id": "5eb393ee95fab7468a79d189",
-    "client-type": "WEB",
-    "content-type": "application/json",
-    "origin": "https://www.pw.live",
-    "referer": "https://www.pw.live/",
-    "randomid": RANDOM_ID,
-    "x-sdk-version": "0.0.28",
-}
+JSON_HEADERS = {**HEADERS, "Content-Type": "application/json"}
 
 # ─── GROUPS ───────────────────────────────────────────────────────────────────
 
@@ -252,92 +226,41 @@ def extract_questions_from_groq(raw: str) -> list:
 
 
 # ─── PW: SEND TEXT MESSAGE ────────────────────────────────────────────────────
-# ─── PW: SEND TEXT MESSAGE ───────────────────────────────────────────────────
 
 def send_message(group, text) -> bool:
-    """
-    Send a text message to one PW group.
-
-    Returns:
-        True  -> message sent successfully
-        False -> request failed
-    """
-
+    """Returns True if message sent successfully, False otherwise."""
     if not text or not text.strip():
-        log(f"  ⚠️ Empty message — {group['name']}")
         return False
-
     payload = {
-        "batchId": BATCH_ID,
-        "groupId": group["groupId"],
-        "role": "Mentor",
-        "type": "text",
-        "text": text,
+        "batchId":   BATCH_ID,
+        "groupId":   group["groupId"],
+        "role":      "Mentor",
+        "type":      "text",
+        "text":      text,
         "filePages": 0,
     }
-
     try:
-        url = (
-            f"{BASE_URL}/v1/conversation/"
-            f"{group['conversationId']}/chat"
-        )
-
         r = requests.post(
-            url,
-            headers=JSON_HEADERS,
-            json=payload,
-            timeout=15,
+            f"{BASE_URL}/v1/conversation/{group['conversationId']}/chat",
+            headers=JSON_HEADERS, json=payload, timeout=15
         )
-
-        # ── SUCCESS ───────────────────────────────────────────────────────
-
         if r.status_code in (200, 201):
             log(f"  ✅ Message → {group['name']}")
             time.sleep(1)
             return True
-
-        # ── AUTHENTICATION / AUTHORIZATION ────────────────────────────────
-
-        if r.status_code in (401, 403):
-            log(
-                f"  ❌ PW authentication/authorization failed "
-                f"→ {group['name']}"
-            )
-            log(f"     HTTP {r.status_code}")
-            log(f"     Response: {r.text[:1000]}")
+        elif r.status_code == 401:
+            log(f"  ❌ Token expired → {group['name']} — update PW_TOKEN in GitHub Secrets!")
             time.sleep(1)
             return False
-
-        # ── OTHER HTTP ERRORS ─────────────────────────────────────────────
-
-        log(
-            f"  ❌ Message failed → {group['name']}: "
-            f"HTTP {r.status_code}"
-        )
-
-        log(f"     Response: {r.text[:1000]}")
-
-        # Don't print the Authorization header/token.
-        log(f"     URL: {url}")
-
+        else:
+            log(f"  ⚠️  Message failed → {group['name']}: {r.status_code} {r.text[:150]}")
+            time.sleep(1)
+            return False
+    except Exception as e:
+        log(f"  ❌ Message error → {group['name']}: {e}")
         time.sleep(1)
         return False
 
-    # ── NETWORK ERROR ────────────────────────────────────────────────────
-
-    except requests.RequestException as e:
-        log(
-            f"  ❌ Network error → {group['name']}: {e}"
-        )
-        return False
-
-    # ── UNEXPECTED ERROR ─────────────────────────────────────────────────
-
-    except Exception as e:
-        log(
-            f"  ❌ Unexpected error → {group['name']}: {e}"
-        )
-        return False
 
 # ─── PW: UPLOAD + SEND IMAGE ──────────────────────────────────────────────────
 
@@ -366,6 +289,7 @@ def upload_image(image_path: str) -> str:
 
 
 def send_image_message(group, image_id, file_size_kb):
+    """Send an uploaded image to a PW group. Returns True on success."""
     payload = {
         "batchId":   BATCH_ID,
         "groupId":   group["groupId"],
@@ -382,11 +306,20 @@ def send_image_message(group, image_id, file_size_kb):
         )
         if r.status_code in (200, 201):
             log(f"  ✅ Image sent → {group['name']}")
+            time.sleep(1)
+            return True
+        elif r.status_code == 401:
+            log(f"  ❌ Token expired → {group['name']} — update PW_TOKEN in GitHub Secrets!")
+            time.sleep(1)
+            return False
         else:
             log(f"  ⚠️  Image failed → {group['name']}: {r.status_code} {r.text[:150]}")
+            time.sleep(1)
+            return False
     except Exception as e:
         log(f"  ❌ Image error → {group['name']}: {e}")
-    time.sleep(1)
+        time.sleep(1)
+        return False
 
 
 # ─── PW: SEND POLL (TWO-STEP) ─────────────────────────────────────────────────
@@ -569,7 +502,7 @@ def download_drive_photo(service, file_id, dest_path):
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 
-def sample_pyq_text(subject, chars=3000):
+def sample_pyq_text(subject, chars=600):
     fname = PDF_DIR / f"{subject.lower()}_pyq.txt"
     if not fname.exists():
         return f"[No PYQ file for {subject} — use general JEE knowledge]"
@@ -586,85 +519,119 @@ def sample_pyq_text(subject, chars=3000):
 
 # ─── GROQ: GENERATE QUESTIONS ─────────────────────────────────────────────────
 
-# ─── GROQ: GENERATE QUESTIONS ─────────────────────────────────────────────────
-
 def generate_questions(subjects):
-    subject_list = "\n".join(f"Q{i+1}: {s}" for i, s in enumerate(subjects))
+    """Generate exactly 5 JEE PYQ-style questions using strict JSON schema."""
+    subject_list = "\n".join(
+        f"Q{i+1}: {s}" for i, s in enumerate(subjects)
+    )
 
-    # Keep the PYQ context small enough for Groq's 8000 TPM limit.
-    pyq_samples = {s: sample_pyq_text(s, chars=1500) for s in set(subjects)}
+    pyq_samples = {
+        s: sample_pyq_text(s, chars=600)
+        for s in set(subjects)
+    }
 
     context_block = "\n\n".join(
         f"=== {s} PYQ SAMPLE ===\n{t}"
         for s, t in pyq_samples.items()
     )
 
-    prompt = f"""You are a JEE question expert. Generate exactly 5 JEE PYQ-style questions.
+    prompt = f"""You are an expert JEE Main and JEE Advanced question setter.
 
-Subject assignment:
+Generate exactly 5 realistic JEE PYQ-style multiple-choice questions.
+
+SUBJECT ASSIGNMENT:
 {subject_list}
 
 PYQ MATERIAL:
 {context_block}
 
+Use the PYQ material only for style and difficulty. Do NOT copy it verbatim.
+
 RULES:
-- Each question MUST include exam year and session tag.
-- 4 options per question (A B C D).
-- correct is 1-4 (1=A, 2=B, 3=C, 4=D).
-- solution: concise 2-4 step working in plain text.
-- CRITICAL: Do NOT use LaTeX backslashes.
-- DO NOT USE QUESTIONS WHERE IMAGES ARE REFERRED OR PRESENT.
-- Write math in plain text: alpha, x^2, sqrt(x), etc.
-- Questions must be complete and unambiguous.
-- Do not copy the PYQ sample verbatim. Use it only as reference for style/topic.
-- Follow the requested subject assignment.
-
-Return ONLY a JSON array containing exactly 5 objects:
-
-[
-  {{
-    "subject": "Physics",
-    "year_tag": "[JEE Main 2023 Jan S2]",
-    "question": "[JEE Main 2023 Jan S2] full question text here",
-    "options": ["A text", "B text", "C text", "D text"],
-    "correct": 2,
-    "solution": "Step 1: ...\\nStep 2: ...\\nAnswer: B"
-  }}
-]"""
+- Generate exactly 5 questions.
+- Follow the subject assignment exactly.
+- Each question must have an exam year/session tag.
+- Each question must have exactly 4 meaningful options.
+- correct must be an integer from 1 to 4.
+- Give a concise 2-4 step solution.
+- Questions must be solvable using the standard JEE syllabus.
+- Do NOT use images, graphs, diagrams, or questions referring to them.
+- Do NOT use LaTeX backslashes.
+- Use plain text mathematics: x^2, sqrt(x), alpha, sin(theta).
+- Avoid ambiguous or incomplete questions.
+- Keep questions and solutions concise.
+- Return only the requested structured data.
+"""
 
     try:
-        log("[INFO] Calling Groq for 5 questions...")
+        log("[INFO] Calling Groq with strict JSON schema...")
 
         resp = groq_client.chat.completions.create(
             model="openai/gpt-oss-20b",
             messages=[
                 {
                     "role": "system",
-                    "content": (
-                        "You are a precise JEE question-generation system. "
-                        "Return only the requested JSON data."
-                    ),
+                    "content": "You are a precise JEE question-generation system. Follow the provided output schema exactly."
                 },
-                {
-                    "role": "user",
-                    "content": prompt,
-                },
+                {"role": "user", "content": prompt}
             ],
-            temperature=0.3,
-            max_tokens=2500,
-            response_format={"type": "json_object"},
-            include_reasoning=False,
+            temperature=0.2,
+            max_tokens=3000,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "jee_quiz_questions",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "questions": {
+                                "type": "array",
+                                "minItems": 5,
+                                "maxItems": 5,
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "subject": {"type": "string"},
+                                        "year_tag": {"type": "string"},
+                                        "question": {"type": "string"},
+                                        "options": {
+                                            "type": "array",
+                                            "minItems": 4,
+                                            "maxItems": 4,
+                                            "items": {"type": "string"}
+                                        },
+                                        "correct": {
+                                            "type": "integer",
+                                            "enum": [1, 2, 3, 4]
+                                        },
+                                        "solution": {"type": "string"}
+                                    },
+                                    "required": [
+                                        "subject", "year_tag", "question",
+                                        "options", "correct", "solution"
+                                    ],
+                                    "additionalProperties": False
+                                }
+                            }
+                        },
+                        "required": ["questions"],
+                        "additionalProperties": False
+                    }
+                }
+            }
         )
 
         raw = resp.choices[0].message.content.strip()
-
-        log(f"[DEBUG] Groq raw (first 150): {raw[:150]}")
-
-        return extract_questions_from_groq(raw)
+        log(f"[DEBUG] Groq raw (first 300): {raw[:300]}")
+        questions = extract_questions_from_groq(raw)
+        log(f"[INFO] Groq generated {len(questions)} valid question(s)")
+        return questions
 
     except Exception as e:
-        log(f"[WARN] Groq call failed: {e}")
+        log(f"[WARN] Groq structured generation failed: {e}")
         return []
+
 
 # ─── GROQ: INTRO MESSAGE ──────────────────────────────────────────────────────
 
@@ -685,11 +652,10 @@ Rules:
 
 Return ONLY the message text."""
     resp = groq_client.chat.completions.create(
-        model="openai/gpt-oss-20b",
+        model="qwen/qwen3.6-27b",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.9,
         max_tokens=150,
-        include_reasoning=False,
     )
     return resp.choices[0].message.content.strip()
 
@@ -721,7 +687,7 @@ Return ONLY JSON: {"quote": "quote text"}"""
     ]
     cat = categories[date.today().toordinal() % len(categories)]
     resp = groq_client.chat.completions.create(
-        model="openai/gpt-oss-20b",
+        model="qwen/qwen3.6-27b",
         messages=[
             {"role": "system", "content": system},
             {"role": "user",   "content": f"Category: {cat}\nSeed: {date.today().toordinal()}"},
@@ -729,7 +695,6 @@ Return ONLY JSON: {"quote": "quote text"}"""
         temperature=0.88,
         max_tokens=200,
         response_format={"type": "json_object"},
-        include_reasoning=False,
     )
     raw = resp.choices[0].message.content.strip()
     try:
@@ -739,6 +704,7 @@ Return ONLY JSON: {"quote": "quote text"}"""
 
 
 # ─── GROQ: COLLEGE CAPTION ────────────────────────────────────────────────────
+
 def generate_college_caption(photo_name):
     prompt = f"""Write a short punchy caption to send with an IIT campus photo to JEE aspirants.
 
@@ -752,36 +718,19 @@ Rules:
 - No hashtags
 
 Return ONLY the caption text."""
+    resp = groq_client.chat.completions.create(
+        model="qwen/qwen3.6-27b",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.92,
+        max_tokens=100,
+    )
+    return resp.choices[0].message.content.strip()
 
-    try:
-        resp = groq_client.chat.completions.create(
-            model="openai/gpt-oss-20b",
-            messages=[{"role": "user", "content": prompt}],
-            reasoning_effort="low",
-            max_completion_tokens=300,
-            include_reasoning=False,
-        )
 
-        message = resp.choices[0].message
-        content = (message.content or "").strip()
-
-        log(f"[DEBUG] GPT-OSS caption response: {message}")
-
-        if content:
-            return content
-
-        log("[WARN] GPT-OSS returned empty caption. Using fallback.")
-        return "One day, this could be your campus. Keep working towards it. 🎯"
-
-    except Exception as e:
-        log(f"[WARN] Caption generation failed: {e}")
-        return "Your IIT journey starts with what you do today. Keep moving. 🎯"
 # ─── GROQ: DAILY CHECKIN ──────────────────────────────────────────────────────
 
 def generate_daily_checkin_message():
-    prompt = f"""
-Write a warm, engaging message to JEE aspirants at 5 PM asking:
-
+    prompt = f"""Write a warm engaging message to JEE aspirants at 5 PM asking:
 1. How their day is going
 2. Whether they covered today's study target
 
@@ -791,44 +740,19 @@ Seed: {date.today().toordinal()}
 Rules:
 - Sound like a caring mentor
 - Casual and warm tone
-- 1-2 lines maximum
+- 1-2 lines max
 - Use English or Hinglish
-- End with an invitation to reply
-- Do not use quotation marks
-- Return ONLY the message text
-"""
+- End with invitation to reply
 
-    try:
-        resp = groq_client.chat.completions.create(
-            model="openai/gpt-oss-20b",
-            messages=[
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.8,
-            max_tokens=100,
-        )
-
-        if resp.choices:
-            content = resp.choices[0].message.content
-
-            if content:
-                content = str(content).strip()
-
-                if content:
-                    log(f"Groq checkin generated: {content[:120]}...")
-                    return content
-
-        log("[WARN] Groq returned empty checkin. Using fallback.")
-
-    except Exception as e:
-        log(f"[WARN] Groq checkin generation failed: {e}")
-        log("[WARN] Using fallback checkin message.")
-
-    return (
-        "Hey champ! How’s your day going? "
-        "Aaj ka study target complete hua? "
-        "Reply karke batao! 💪"
+Return ONLY the message text."""
+    resp = groq_client.chat.completions.create(
+        model="qwen/qwen3.6-27b",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.92,
+        max_tokens=200,
     )
+    return resp.choices[0].message.content.strip()
+
 
 # ─── GROQ: WEEKLY REVIEW ──────────────────────────────────────────────────────
 
@@ -848,11 +772,10 @@ Rules:
 
 Return ONLY the message text."""
     resp = groq_client.chat.completions.create(
-        model="openai/gpt-oss-20b",
+        model="qwen/qwen3.6-27b",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.92,
         max_tokens=250,
-        include_reasoning=False,
     )
     return resp.choices[0].message.content.strip()
 
@@ -860,76 +783,88 @@ Return ONLY the message text."""
 # ─── MODE: MOTIVATION (8 AM daily) ───────────────────────────────────────────
 
 def run_motivation():
-    log("=== MODE: MOTIVATION (8 AM) ===")
+    log("=== MODE: MOTIVATION IMAGE (8 AM) ===")
 
-    # Try generating a quote, with fallback if PW blocks it
-    quote = None
-    for attempt in range(3):
-        try:
-            q = generate_motivation_quote()
-            # Pre-screen: avoid words PW commonly blocks
-            blocked_words = ["3 AM", "3AM", "doubt", "quit", "fail", "die", "kill", "blood"]
-            if any(w.lower() in q.lower() for w in blocked_words):
-                log(f"[WARN] Quote contains potentially blocked word, retrying... (attempt {attempt+1})")
-                time.sleep(1)
-                continue
-            quote = q
-            break
-        except Exception as e:
-            log(f"[WARN] Quote generation failed attempt {attempt+1}: {e}")
-            time.sleep(1)
+    motivation_path = None
 
-    if not quote:
-        quote = "Today is another chance to get closer to your IIT dream. Stay focused, stay consistent. You've got this! 💪"
-        log("[WARN] Using fallback quote")
+    try:
+        log("Generating today's motivation image...")
+        motivation_path = generate_today(save=True)
 
-    log(f"Quote: {quote[:80]}...")
-    msg = f"🌅 Good Morning, Lakshya JEE 2027!\n\n{quote}\n\n— Keep going. Your IIT is waiting. 💪"
+        if not motivation_path:
+            raise Exception("Motivation generator returned no image path.")
 
-    success = 0
-    fail    = 0
-    token_expired = False
+        motivation_path = Path(motivation_path)
 
-    for group in GROUPS:
-        log(f"Sending to {group['name']}...")
-        ok = send_message(group, msg)
-        if ok:
-            success += 1
-        else:
-            # Check if it's a token issue
-            fail += 1
-            # Try fallback if prohibited word
-            fallback = "🌅 Good Morning, Lakshya JEE 2027!\n\nStart strong today. Every problem you solve is one step closer to your IIT rank. Keep going! 💪"
-            ok2 = send_message(group, fallback)
-            if ok2:
+        if not motivation_path.exists():
+            raise FileNotFoundError(
+                f"Generated motivation image not found: {motivation_path}"
+            )
+
+        file_size_kb = motivation_path.stat().st_size // 1024
+        log(f"✅ Motivation image generated → {motivation_path} ({file_size_kb} KB)")
+
+        log("Uploading motivation image to PW...")
+        image_id = upload_image(str(motivation_path))
+
+        if not image_id:
+            raise Exception("PW image upload returned no image ID.")
+
+        log(f"✅ Motivation image uploaded → imageId: {image_id}")
+
+        success = 0
+        fail = 0
+
+        for group in GROUPS:
+            log(f"Sending motivation image → {group['name']}...")
+            ok = send_image_message(group, image_id, file_size_kb)
+            if ok:
                 success += 1
-                fail -= 1
+            else:
+                fail += 1
 
-    log(f"Motivation results: {success}/5 sent, {fail}/5 failed")
+        log(f"Motivation image results: {success}/5 sent, {fail}/5 failed")
 
-    if success == 0:
-        msg_alert = (
-            f"❌ Morning Motivation FAILED — 0/5 groups received the message.\n"
-            f"Most likely cause: PW_TOKEN expired.\n\n"
-            f"Fix: pw.live → group → create poll → copy Authorization header → "
-            f"GitHub Secrets → PW_TOKEN → Update\n\n"
-            f"Quote attempted: {quote}"
+        if success == 0:
+            msg = (
+                "❌ Morning Motivation Image FAILED\n\n"
+                "Image was generated but could not be sent to any group.\n"
+                f"Image: {motivation_path.name}\n"
+                "Most likely cause: PW_TOKEN expired."
+            )
+            log(msg)
+            send_alert("❌ Morning Motivation Image FAILED", msg)
+            sys.exit(1)
+
+        elif fail > 0:
+            send_alert(
+                f"⚠️ Morning Motivation Image — {fail} groups failed",
+                f"Sent: {success}/5\nFailed: {fail}/5\nImage: {motivation_path.name}\nDate: {date.today()}"
+            )
+        else:
+            log("✅ Motivation image sent to all 5 groups.")
+            send_alert(
+                "✅ Morning Motivation Image Sent",
+                f"Motivation image sent to all 5 groups.\nImage: {motivation_path.name}\nDate: {date.today()}"
+            )
+
+    except Exception as e:
+        log(f"❌ Motivation image generation/sending failed: {e}")
+        send_alert(
+            "❌ Morning Motivation Image FAILED",
+            f"Error: {e}\n\nDate: {date.today()}"
         )
-        log(f"❌ {msg_alert}")
-        send_alert("❌ Morning Motivation FAILED — Token likely expired", msg_alert)
         sys.exit(1)
-    elif fail > 0:
-        log("⚠️  Motivation sent to some groups.")
-        send_alert(
-            f"⚠️ Morning Motivation — {fail} groups failed",
-            f"Sent: {success}/5\nFailed: {fail}/5\nDate: {date.today()}\nQuote: {quote}"
-        )
-    else:
-        log("✅ Motivation mode complete.")
-        send_alert(
-            "✅ Morning Motivation Sent",
-            f"Sent to all 5 groups.\nDate: {date.today()}\nQuote: {quote}"
-        )
+
+    finally:
+        if motivation_path:
+            try:
+                motivation_path = Path(motivation_path)
+                if motivation_path.exists():
+                    motivation_path.unlink()
+                    log(f"🗑️ Removed temporary motivation image: {motivation_path.name}")
+            except Exception as e:
+                log(f"[WARN] Could not remove motivation image: {e}")
 
 
 # ─── MODE: QUIZ (1 PM Mon-Fri) ───────────────────────────────────────────────
@@ -946,7 +881,7 @@ def run_quiz():
     questions = []
     attempts  = 0
 
-    while len(questions) < 5 and attempts < 8:
+    while len(questions) < 5 and attempts < 3:
         attempts += 1
         needed = 5 - len(questions)
         log(f"Attempt {attempts}: need {needed} more question(s)...")
@@ -1116,112 +1051,48 @@ def run_solution():
 
 # ─── MODE: CHECKIN (5 PM daily) ───────────────────────────────────────────────
 
-# ─── MODE: CHECKIN (5 PM DAILY) ───────────────────────────────────────────────
-
 def run_checkin():
     log("=== MODE: CHECKIN (5 PM) ===")
-
     is_saturday = date.today().weekday() == 5
 
     if is_saturday:
         log("Saturday — generating weekly review...")
-        message = generate_weekly_review_message()
-        header = "📊 Weekly Review Time!"
+        message       = generate_weekly_review_message()
+        header        = "📊 Weekly Review Time!"
         email_subject = "✅ Weekly Review Sent"
     else:
         log("Generating daily checkin...")
-        message = generate_daily_checkin_message()
-        header = ""
+        message       = generate_daily_checkin_message()
+        header        = ""
         email_subject = "✅ Daily Checkin Sent"
 
-    if not message or not message.strip():
-        log("❌ Generated checkin message is empty.")
-
-        send_alert(
-            "❌ Daily Checkin Generation Failed",
-            f"The generated checkin message was empty.\n"
-            f"Date: {date.today()}"
-        )
-
-        raise RuntimeError(
-            "Daily checkin message generation returned empty text."
-        )
-
-    log(f"Message: {message[:120]}...")
+    log(f"Message: {message[:80]}...")
 
     success = 0
-    fail = 0
-
+    fail    = 0
     for group in GROUPS:
         log(f"Sending to {group['name']}...")
-
         ok = send_message(group, message)
-
         if ok:
             success += 1
         else:
             fail += 1
 
-    log(
-        f"Checkin results: "
-        f"{success}/{len(GROUPS)} sent, "
-        f"{fail}/{len(GROUPS)} failed"
-    )
-
-    # ── ALL FAILED ───────────────────────────────────────────────────────
+    log(f"Checkin results: {success}/5 sent, {fail}/5 failed")
 
     if success == 0:
-        log(
-            f"❌ All groups failed — "
-            f"{fail}/{len(GROUPS)} groups failed"
-        )
-
-        send_alert(
-            "❌ Daily Checkin Failed",
-            f"Sent: {success}/{len(GROUPS)}\n"
-            f"Failed: {fail}/{len(GROUPS)}\n"
-            f"Date: {date.today()}\n\n"
-            f"Check the GitHub Actions log for the actual PW API "
-            f"response."
-        )
-
-        raise RuntimeError(
-            "Checkin failed for all groups."
-        )
-
-    # ── PARTIAL SUCCESS ──────────────────────────────────────────────────
-
-    elif success < len(GROUPS):
-        log(
-            f"⚠️ Checkin partially sent — "
-            f"{success}/{len(GROUPS)} successful, "
-            f"{fail}/{len(GROUPS)} failed"
-        )
-
-        send_alert(
-            "⚠️ Daily Checkin Partially Sent",
-            f"Sent: {success}/{len(GROUPS)}\n"
-            f"Failed: {fail}/{len(GROUPS)}\n"
-            f"Date: {date.today()}\n\n"
-            f"Check the GitHub Actions log for failed groups."
-        )
-
-        # Don't silently call this a successful run.
-        raise RuntimeError(
-            f"Checkin partially failed: "
-            f"{success}/{len(GROUPS)} sent."
-        )
-
-    # ── ALL SUCCESS ──────────────────────────────────────────────────────
-
+        log("❌ All groups failed — token likely expired")
+        send_alert("❌ Checkin FAILED — Token likely expired",
+                   f"0/5 groups received checkin.\nFix: refresh PW_TOKEN in GitHub Secrets.\nDate: {date.today()}")
+        sys.exit(1)
+    elif fail > 0:
+        send_alert(f"⚠️ Checkin — {fail} groups failed",
+                   f"Sent: {success}/5\nFailed: {fail}/5\nDate: {date.today()}")
     else:
         log("✅ Checkin mode complete.")
+        send_alert(email_subject, f"Checkin sent to all 5 groups.\nDate: {date.today()}")
 
-        send_alert(
-            email_subject,
-            f"Checkin sent to all {len(GROUPS)} groups.\n"
-            f"Date: {date.today()}"
-        )
+
 # ─── MODE: COLLEGE (3 PM Mon-Wed-Fri) ────────────────────────────────────────
 
 def run_college():
@@ -1300,7 +1171,6 @@ def main():
     )
     args = parser.parse_args()
     log(f"Starting in mode: {args.mode.upper()}")
-    log(f"PW_TOKEN received: yes | length={len(PW_TOKEN)} | format={PW_TOKEN_FORMAT}")
 
     try:
         if args.mode == "motivation":
