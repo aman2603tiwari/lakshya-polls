@@ -531,6 +531,42 @@ def send_no_messages_email(
 
 
 # ============================================================
+# EMAIL — MONITOR INCOMPLETE / FAILED
+# ============================================================
+
+def send_monitor_failure_email(checked_at, checked_groups, failed_groups):
+    """Send a warning when not all groups were successfully checked."""
+    subject = (
+        "⚠️ Lakshya JEE 2027 — Message Monitor Incomplete"
+    )
+
+    lines = [
+        "The student-message monitor could NOT complete a full check.",
+        "",
+        f"Monitor check time: {checked_at}",
+        "",
+        "Summary:",
+        f"- Groups checked successfully: {checked_groups}/{len(GROUPS)}",
+        f"- Groups failed/inaccessible: {len(failed_groups)}/{len(GROUPS)}",
+        "",
+        "IMPORTANT: No conclusion about new student messages can be made.",
+        "The monitor will NOT report 'No New Student Messages' when any",
+        "group could not be checked.",
+        "",
+        "Failed groups:",
+        "",
+    ]
+
+    for group in failed_groups:
+        lines.append(
+            f"- {group['name']}: {group['status']}"
+        )
+
+    body = "\n".join(lines)
+    send_email(subject, body)
+
+
+# ============================================================
 # COMMON EMAIL SENDER
 # ============================================================
 
@@ -861,9 +897,15 @@ def main():
 
     state["seen_ids"] = next_seen
 
-    # The baseline is considered established after the first
-    # run, even if some groups were temporarily inaccessible.
-    state["initialized"] = True
+    # Only mark the global baseline as initialized after ALL groups
+    # have been successfully checked. If a group was inaccessible
+    # (for example because PW_TOKEN expired), do not establish a
+    # partial baseline and do not risk treating unseen old messages
+    # as new on a later run.
+    if checked_groups == len(GROUPS) and not inaccessible_groups:
+        state["initialized"] = True
+    else:
+        state["initialized"] = initialized
 
     save_state(
         state
@@ -877,7 +919,22 @@ def main():
     # SEND EXACTLY ONE EMAIL
     # ========================================================
 
-    if all_new_student_messages:
+    if inaccessible_groups:
+
+        # ----------------------------------------------------
+        # INCOMPLETE CHECK — DO NOT CLAIM NO MESSAGES
+        # ----------------------------------------------------
+        # If even one group failed, the monitor cannot safely
+        # conclude that there are no new student messages.
+        # This is especially important for 401/token failures.
+
+        send_monitor_failure_email(
+            checked_at=checked_at,
+            checked_groups=checked_groups,
+            failed_groups=inaccessible_groups,
+        )
+
+    elif all_new_student_messages:
 
         # ----------------------------------------------------
         # STUDENT MESSAGES EXIST
@@ -893,11 +950,9 @@ def main():
 
         # ----------------------------------------------------
         # NO NEW STUDENT MESSAGES
-        #
-        # This includes:
-        #   - No new messages at all
-        #   - Only Aman sent new messages
         # ----------------------------------------------------
+        # This branch is reached ONLY after all five groups
+        # have been successfully checked.
 
         send_no_messages_email(
             checked_at=checked_at,
