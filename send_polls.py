@@ -49,32 +49,39 @@ BASE_URL  = "https://api.penpencil.co"
 CLIENT_ID = "5eb393ee95fab7468a79d189"
 BATCH_ID  = "6779345c20fa0756e4a7fd08"
 
-HEADERS = {
-    "Authorization": f"Bearer {PW_TOKEN}",
-    "client-id":     CLIENT_ID,
-    "client-type":   "WEB",
-    "origin":        "https://www.pw.live",
-    "referer":       "https://www.pw.live/",
-    "x-sdk-version": "0.0.28",
-    "randomid":      "2f81cbed-4d22-4f57-994e-3f78dbf6e309",
-}
-
 import uuid
 
-RANDOM_ID = str(uuid.uuid4())
+def get_pw_headers(json_request=False):
+    """
+    Build fresh browser-style PW headers for every request.
 
-JSON_HEADERS = {
-    "accept": "*/*",
-    "accept-language": "en-US,en;q=0.9,hi;q=0.8",
-    "authorization": f"Bearer {PW_TOKEN}",
-    "client-id": "5eb393ee95fab7468a79d189",
-    "client-type": "WEB",
-    "content-type": "application/json",
-    "origin": "https://www.pw.live",
-    "referer": "https://www.pw.live/",
-    "randomid": RANDOM_ID,
-    "x-sdk-version": "0.0.28",
-}
+    Important:
+    - PW accepts the token as: Bearer <token>
+    - randomid is regenerated per request, matching the working
+      browser/curl request.
+    - JSON requests explicitly send content-type: application/json.
+    """
+    headers = {
+        "accept": "*/*",
+        "accept-language": "en-US,en;q=0.9,hi;q=0.8",
+        "authorization": f"Bearer {PW_TOKEN}",
+        "client-id": CLIENT_ID,
+        "client-type": "WEB",
+        "origin": "https://www.pw.live",
+        "referer": "https://www.pw.live/",
+        "randomid": str(uuid.uuid4()),
+        "x-sdk-version": "0.0.28",
+    }
+
+    if json_request:
+        headers["content-type"] = "application/json"
+
+    return headers
+
+# Keep these names for compatibility with the rest of the file.
+# A fresh header set is generated at the point of each request below.
+HEADERS = get_pw_headers(json_request=False)
+JSON_HEADERS = get_pw_headers(json_request=True)
 
 # ─── GROUPS ───────────────────────────────────────────────────────────────────
 
@@ -284,7 +291,7 @@ def send_message(group, text) -> bool:
 
         r = requests.post(
             url,
-            headers=JSON_HEADERS,
+            headers=get_pw_headers(json_request=True),
             json=payload,
             timeout=15,
         )
@@ -348,7 +355,7 @@ def upload_image(image_path: str) -> str:
         files = {"file": (path.name, f, "image/jpeg")}
         r = requests.post(
             f"{BASE_URL}/v1/files",
-            headers=HEADERS, files=files, timeout=30
+            headers=get_pw_headers(json_request=False), files=files, timeout=30
         )
     if r.status_code in (200, 201):
         data     = r.json()
@@ -378,7 +385,7 @@ def send_image_message(group, image_id, file_size_kb):
     try:
         r = requests.post(
             f"{BASE_URL}/v1/conversation/{group['conversationId']}/chat",
-            headers=JSON_HEADERS, json=payload, timeout=15
+            headers=get_pw_headers(json_request=True), json=payload, timeout=15
         )
         if r.status_code in (200, 201):
             log(f"  ✅ Image sent → {group['name']}")
@@ -418,7 +425,7 @@ def send_poll(group, question):
     try:
         r1 = requests.post(
             f"{BASE_URL}/v2/poll/create-poll",
-            headers=JSON_HEADERS, json=create_payload, timeout=15
+            headers=get_pw_headers(json_request=True), json=create_payload, timeout=15
         )
         if r1.status_code not in (200, 201):
             log(f"  ⚠️  Poll create failed → {group['name']}: {r1.status_code} {r1.text[:200]}")
@@ -455,7 +462,7 @@ def send_poll(group, question):
     try:
         r2 = requests.post(
             f"{BASE_URL}/v1/conversation/{group['conversationId']}/chat",
-            headers=JSON_HEADERS, json=chat_payload, timeout=15
+            headers=get_pw_headers(json_request=True), json=chat_payload, timeout=15
         )
         if r2.status_code in (200, 201):
             log(f"  ✅ Poll sent → {group['name']}: {question['question'][:55]}...")
