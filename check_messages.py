@@ -24,7 +24,7 @@ import json
 import os
 import smtplib
 import sys
-
+import uuid
 from datetime import datetime, timezone, timedelta
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -99,7 +99,7 @@ HEADERS = {
     "origin": "https://www.pw.live",
     "referer": "https://www.pw.live/",
     "x-sdk-version": "0.0.28",
-    "randomid": "2f81cbed-4d22-4f57-994e-3f78dbf6e309",
+    "randomid": str(uuid.uuid4()),
 }
 
 
