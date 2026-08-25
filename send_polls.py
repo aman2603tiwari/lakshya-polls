@@ -13,7 +13,7 @@ GitHub Secrets required:
   GDRIVE_SA_JSON    — full JSON of Google service account key
   GDRIVE_FOLDER_ID  — ID of the Drive folder containing college photos
 """
-
+import hashlib
 import os, sys, json, random, time, argparse, smtplib, traceback, re
 from datetime import date, datetime
 from pathlib import Path
@@ -36,7 +36,7 @@ else:
 
 if not PW_TOKEN:
     raise RuntimeError("PW_TOKEN is empty. Update the PW_TOKEN GitHub Secret.")
-
+TOKEN_FINGERPRINT = hashlib.sha256(PW_TOKEN.encode()).hexdigest()[:16]
 GROQ_API_KEY     = os.environ["GROQ_API_KEY"]
 ALERT_EMAIL      = os.environ.get("ALERT_EMAIL", "")
 GMAIL_APP_PWD    = os.environ.get("GMAIL_APP_PWD", "")
@@ -1307,7 +1307,10 @@ def main():
     )
     args = parser.parse_args()
     log(f"Starting in mode: {args.mode.upper()}")
-    log(f"PW_TOKEN received: yes | length={len(PW_TOKEN)} | format={PW_TOKEN_FORMAT}")
+    log(
+    f"PW_TOKEN received: yes | length={len(PW_TOKEN)} "
+    f"| format={PW_TOKEN_FORMAT} | fingerprint={TOKEN_FINGERPRINT}"
+)
 
     try:
         if args.mode == "motivation":
