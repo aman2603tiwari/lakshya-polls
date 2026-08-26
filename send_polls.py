@@ -29,6 +29,8 @@ GitHub Secrets:
   GMAIL_APP_PWD
   GDRIVE_SA_JSON
   GDRIVE_FOLDER_ID
+  GDRIVE_BACKUP_FILE_ID
+  GDRIVE_BACKUP_FILE_ID  — existing Drive JSON file ID used for quiz backup
 """
 
 from __future__ import annotations
@@ -80,6 +82,7 @@ GMAIL_APP_PWD = os.environ.get("GMAIL_APP_PWD", "").strip()
 
 GDRIVE_SA_JSON = os.environ.get("GDRIVE_SA_JSON", "").strip()
 GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "").strip()
+GDRIVE_BACKUP_FILE_ID = os.environ.get("GDRIVE_BACKUP_FILE_ID", "").strip()
 
 BASE_URL = "https://api.penpencil.co"
 CLIENT_ID = "5eb393ee95fab7468a79d189"
@@ -511,89 +514,67 @@ def sample_pyq_text(subject: str, chars: int = 1500) -> str:
     return chunk[nl:].strip() if nl > 0 else chunk.strip()
 
 
-def generate_questions(subjects: Tuple[str, ...]) -> List[dict]:
-    subject_list = "\n".join(
-        f"Q{i + 1}: {subject}" for i, subject in enumerate(subjects)
-    )
-
-    pyq_samples = {
-        subject: sample_pyq_text(subject, chars=1200)
-        for subject in sorted(set(subjects))
-    }
-
-    context_block = "\n\n".join(
-        f"=== {subject} PYQ SAMPLE ===\n{text}"
-        for subject, text in pyq_samples.items()
-    )
-
+def generate_one_question(subject: str, previously_used: set[str], attempt: int = 1) -> List[dict]:
+    """Generate exactly ONE question. Small requests avoid Groq completion/token-limit failures."""
+    pyq_sample = sample_pyq_text(subject, chars=900)
     prompt = f"""
-You are generating JEE Main PYQ-STYLE practice questions, not claiming that
-the generated questions are authentic past-year questions.
-
-Generate exactly 5 questions with this exact subject assignment and order:
-{subject_list}
+Generate exactly ONE JEE Main PYQ-STYLE practice question for {subject}.
+This is a generated practice question; do NOT claim it is an authentic PYQ.
 
 PYQ STYLE MATERIAL:
-{context_block}
+{pyq_sample}
 
 RULES:
-- The subject of each object MUST match its requested Q number.
-- Each question must be self-contained and answerable without an image.
-- Each question must have exactly four options.
-- correct must be an integer from 1 to 4.
-- solution must explain the answer clearly in plain text.
-- Include a plausible JEE Main year/session tag such as
-  "[JEE Main 2023 Jan S2]" for metadata/style only.
-- Do not claim that the generated question itself is an authentic PYQ.
-- Do not copy any sample verbatim.
-- Do not use LaTeX backslashes.
-- Use plain text notation such as x^2, sqrt(x), sin(theta).
-- Avoid ambiguous questions and duplicate options.
+- Return ONLY one JSON object with a single "questions" array containing exactly one object.
+- Subject MUST be {subject}.
+- The question must be self-contained and answerable without an image.
+- Exactly four distinct options.
+- correct must be an integer 1-4.
+- solution must clearly explain the answer in plain text.
+- Include a plausible JEE Main year/session tag such as [JEE Main 2023 Jan S2] for style/metadata only.
+- Do not claim the generated question is an authentic PYQ.
+- Do not copy the sample verbatim.
+- Do not use LaTeX backslashes. Use plain text such as x^2, sqrt(x), sin(theta).
 - Do not refer to figures, graphs, diagrams, images, or tables.
-- Do not put markdown around the JSON.
-- Return ONLY one JSON OBJECT with a "questions" array.
+- Avoid ambiguous wording and duplicate options.
+- Return valid JSON only; no markdown fences.
 
-Required JSON shape:
+JSON SHAPE:
 {{
   "questions": [
     {{
-      "subject": "Maths",
+      "subject": "{subject}",
       "year_tag": "[JEE Main 2023 Jan S2]",
       "question": "Complete question text",
-      "options": ["Option A", "Option B", "Option C", "Option D"],
+      "options": ["A", "B", "C", "D"],
       "correct": 2,
-      "solution": "Step 1: ... Step 2: ... Answer: B"
+      "solution": "Explanation... Answer: B"
     }}
   ]
 }}
 """.strip()
 
     try:
-        log("[INFO] Calling Groq for 5 questions...")
+        log(f"[INFO] Calling Groq for 1 {subject} question (attempt {attempt})...")
         resp = groq_client.chat.completions.create(
             model="openai/gpt-oss-20b",
             messages=[
                 {
                     "role": "system",
-                    "content": (
-                        "You are a precise JEE question-generation system. "
-                        "Return only valid JSON matching the requested schema."
-                    ),
+                    "content": "You generate one precise JEE practice question. Return only valid JSON matching the requested schema.",
                 },
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.3,
-            max_tokens=3000,
+            temperature=0.25,
+            max_tokens=1200,
             response_format={"type": "json_object"},
             include_reasoning=False,
         )
-
         raw = (resp.choices[0].message.content or "").strip()
         log(f"[DEBUG] Groq raw (first 150): {raw[:150]}")
         return extract_questions_from_groq(raw)
-
     except Exception as e:
-        log(f"[WARN] Groq question generation failed: {e}")
+        log(f"[WARN] Groq question generation failed for {subject}: {e}")
         return []
 
 
@@ -1225,54 +1206,46 @@ def get_drive_service(readonly: bool = True):
 
 
 def upload_json_to_drive(data: dict) -> None:
-    require_drive_config()
+    """Update an existing backup file; never create a new My Drive file.
+
+    Google service accounts have no personal Drive storage quota. Updating an
+    already-existing file avoids the storageQuotaExceeded error seen in CI.
+    Set GDRIVE_BACKUP_FILE_ID to that existing JSON file's ID.
+    """
+    if not GDRIVE_SA_JSON:
+        raise RuntimeError("GDRIVE_SA_JSON secret is missing.")
+    if not GDRIVE_BACKUP_FILE_ID:
+        raise RuntimeError(
+            "GDRIVE_BACKUP_FILE_ID secret is missing. Create one JSON backup file in Drive, "
+            "share it with the service account as Editor, and store its file ID in this secret."
+        )
 
     import io
     from googleapiclient.http import MediaIoBaseUpload
 
     service = get_drive_service(readonly=False)
-    filename = get_questions_drive_filename()
-
-    content = json.dumps(
-        data,
-        ensure_ascii=False,
-        indent=2,
-    ).encode("utf-8")
-
+    content = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
     media = MediaIoBaseUpload(
         io.BytesIO(content),
         mimetype="application/json",
         resumable=False,
     )
 
-    results = service.files().list(
-        q=(
-            f"'{GDRIVE_FOLDER_ID}' in parents "
-            f"and name='{filename}' and trashed=false"
-        ),
-        fields="files(id,name)",
-        pageSize=100,
+    # Confirm the target exists and is accessible before attempting the update.
+    target = service.files().get(
+        fileId=GDRIVE_BACKUP_FILE_ID,
+        fields="id,name,mimeType,parents,trashed",
     ).execute()
 
-    existing = results.get("files", [])
+    if target.get("trashed"):
+        raise RuntimeError("GDRIVE_BACKUP_FILE_ID points to a trashed file.")
 
-    if existing:
-        service.files().update(
-            fileId=existing[0]["id"],
-            media_body=media,
-        ).execute()
-        log(f"✅ Updated {filename} in Drive")
-    else:
-        metadata = {
-            "name": filename,
-            "parents": [GDRIVE_FOLDER_ID],
-        }
-        service.files().create(
-            body=metadata,
-            media_body=media,
-            fields="id",
-        ).execute()
-        log(f"✅ Created {filename} in Drive")
+    service.files().update(
+        fileId=GDRIVE_BACKUP_FILE_ID,
+        media_body=media,
+    ).execute()
+
+    log(f"✅ Updated existing Drive backup: {target.get('name', GDRIVE_BACKUP_FILE_ID)}")
 
 
 def download_json_from_drive() -> dict:
@@ -1487,36 +1460,74 @@ def run_quiz() -> int:
         history = load_history()
         used = set(history["used"])
 
+        # Generate one question at a time. This deliberately trades speed for
+        # reliability: a single Groq request now contains only one question, so
+        # a long solution cannot consume the completion budget for four other
+        # questions. A question is accepted only after local structural validation.
         questions = []
-        max_attempts = 8
+        per_question_attempts = 8
 
-        for attempt in range(1, max_attempts + 1):
-            log(f"Generation attempt {attempt}/{max_attempts}")
+        for index, subject in enumerate(subjects, start=1):
+            accepted = None
 
-            raw_questions = generate_questions(subjects)
+            for attempt in range(1, per_question_attempts + 1):
+                log(
+                    f"Generating Q{index}/5 [{subject}] — "
+                    f"attempt {attempt}/{per_question_attempts}"
+                )
 
-            ok, selected, reason = validate_question_set(
-                raw_questions,
-                subjects,
-                used,
-            )
+                candidates = generate_one_question(
+                    subject,
+                    used,
+                    attempt=attempt,
+                )
 
-            if ok:
-                questions = selected
-                log("✅ Generated 5 structurally valid, unused questions.")
+                if len(candidates) != 1:
+                    log(
+                        f"[WARN] Q{index} rejected: Groq returned "
+                        f"{len(candidates)} question(s), expected exactly 1."
+                    )
+                    time.sleep(2)
+                    continue
+
+                q = candidates[0]
+                ok, reason = validate_question(q)
+                if not ok:
+                    log(f"[WARN] Q{index} rejected: {reason}")
+                    time.sleep(2)
+                    continue
+
+                fp = question_fingerprint(q["question"])
+                if fp in used or any(
+                    question_fingerprint(existing["question"]) == fp
+                    for existing in questions
+                ):
+                    log(f"[WARN] Q{index} rejected: duplicate/previously used question.")
+                    time.sleep(2)
+                    continue
+
+                accepted = q
                 break
 
-            log(f"[WARN] Generation attempt rejected: {reason}")
-            time.sleep(2)
+            if accepted is None:
+                msg = (
+                    f"Quiz generation failed at Q{index}/5 ({subject}). "
+                    f"Could not obtain one valid unused question after "
+                    f"{per_question_attempts} attempts. "
+                    f"Already accepted: {len(questions)}/5."
+                )
+                log(f"❌ {msg}")
+                send_alert("❌ Lakshya Quiz FAILED — generation", msg)
+                return 1
 
-        if len(questions) != 5:
-            msg = (
-                f"Quiz generation failed: could not obtain exactly 5 valid "
-                f"questions after {max_attempts} attempts."
+            questions.append(accepted)
+            used.add(question_fingerprint(accepted["question"]))
+            log(
+                f"✅ Q{index}/5 accepted [{subject}]: "
+                f"{accepted['question'][:90]}..."
             )
-            log(f"❌ {msg}")
-            send_alert("❌ Lakshya Quiz FAILED — generation", msg)
-            return 1
+
+        log("✅ Generated 5 structurally valid, unused questions one-by-one.")
 
         intro = generate_intro_message(subjects)
 
